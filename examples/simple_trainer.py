@@ -97,6 +97,8 @@ class Config:
     save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
     # Whether to save ply file (storage size can be large)
     save_ply: bool = False
+    # Change the export format. Those are the formats supported by the export_splats library function
+    save_ply_fmt: Literal['ply', 'splat', 'ply_compressed'] = 'ply'
     # Steps to save the model as ply
     ply_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
     # Whether to disable video generation during training and evaluation
@@ -157,7 +159,9 @@ class Config:
     opacity_reg: float = 0.0
     # Scale regularization
     scale_reg: float = 0.0
-
+    # Smoke regularization: nudges greyish gaussians to be more transparent
+    smoke_reg: float = 0.0
+    
     # Enable camera optimization.
     pose_opt: bool = False
     # Learning rate for camera optimization
@@ -737,11 +741,17 @@ class Runner:
                 loss += tvloss
 
             # regularizations
-            # TODO isotropy reg
             if cfg.opacity_reg > 0.0:
-                loss += cfg.opacity_reg * torch.sigmoid(self.splats["opacities"]).mean()
+                loss += cfg.opacity_reg * \
+                    torch.sigmoid(self.splats["opacities"]).mean()
             if cfg.scale_reg > 0.0:
                 loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
+            # TODO isotropy reg
+            # TODO tones of gray reg
+            # TODO density reg
+            if cfg.smoke_reg:
+                breakpoint()
+                sh0 = self.splats['sh0']
 
             loss.backward()
 
@@ -811,41 +821,10 @@ class Runner:
                 torch.save(
                     data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
                 )
-            if (
+            if cfg.save_ply and (
                 step in [i - 1 for i in cfg.ply_steps] or step == max_steps - 1
-            ) and cfg.save_ply:
-
-                if self.cfg.app_opt:
-                    # eval at origin to bake the appeareance into the colors
-                    rgb = self.app_module(
-                        features=self.splats["features"],
-                        embed_ids=None,
-                        dirs=torch.zeros_like(
-                            self.splats["means"][None, :, :]),
-                        sh_degree=sh_degree_to_use,
-                    )
-                    rgb = rgb + self.splats["colors"]
-                    rgb = torch.sigmoid(rgb).squeeze(0).unsqueeze(1)
-                    sh0 = rgb_to_sh(rgb)
-                    shN = torch.empty([sh0.shape[0], 0, 3], device=sh0.device)
-                else:
-                    sh0 = self.splats["sh0"]
-                    shN = self.splats["shN"]
-
-                means = self.splats["means"]
-                scales = self.splats["scales"]
-                quats = self.splats["quats"]
-                opacities = self.splats["opacities"]
-                export_splats(
-                    means=means,
-                    scales=scales,
-                    quats=quats,
-                    opacities=opacities,
-                    sh0=sh0,
-                    shN=shN,
-                    format="ply",
-                    save_to=f"{self.ply_dir}/point_cloud_{step}.ply",
-                )
+            ):
+                self.save_ply(step=step, sh_degree_to_use=sh_degree_to_use)
 
             # Turn Gradients into Sparse Tensor before running optimizer
             if cfg.sparse_grad:
@@ -936,6 +915,48 @@ class Runner:
                 self.viewer.update(step, num_train_rays_per_step)
 
     @torch.no_grad()
+    def save_ply(self,*, step:int, sh_degree_to_use: int | None = None):
+        """ frontend for the export_splats function.
+
+            Args:
+                step (int): Indicate the iteration in the exported file name. Does not magically allow to rewind time on the training checkpoint.
+                sh_degree_to_use (int | None): indicates what SH bands the scheduler allows to export. defaults to the maximum band allowed by configuration when None.
+        """
+
+        sh_degree_to_use = sh_degree_to_use or self.cfg.sh_degree
+        if self.cfg.app_opt:
+            # eval at origin to bake the appeareance into the colors
+            rgb = self.app_module(
+                features=self.splats["features"],
+                embed_ids=None,
+                dirs=torch.zeros_like(
+                    self.splats["means"][None, :, :]),
+                sh_degree=sh_degree_to_use,
+            )
+            rgb = rgb + self.splats["colors"]
+            rgb = torch.sigmoid(rgb).squeeze(0).unsqueeze(1)
+            sh0 = rgb_to_sh(rgb)
+            shN = torch.empty([sh0.shape[0], 0, 3], device=sh0.device)
+        else:
+            sh0 = self.splats["sh0"]
+            shN = self.splats["shN"]
+
+        means = self.splats["means"]
+        scales = self.splats["scales"]
+        quats = self.splats["quats"]
+        opacities = self.splats["opacities"]
+        export_splats(
+            means=means,
+            scales=scales,
+            quats=quats,
+            opacities=opacities,
+            sh0=sh0,
+            shN=shN,
+            format=self.cfg.save_ply_fmt,
+            save_to=f"{self.ply_dir}/point_cloud_{step}.{self.cfg.save_ply_fmt}",
+        )
+
+    @torch.no_grad()
     def eval(self, step: int, stage: None | str = None):
         """Entry for evaluation."""
         print("Running evaluation...")
@@ -997,7 +1018,8 @@ class Runner:
                     cc_colors_p = cc_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
                     metrics["cc_psnr"].append(self.psnr(cc_colors_p, pixels_p))
                     metrics["cc_ssim"].append(self.ssim(cc_colors_p, pixels_p))
-                    metrics["cc_lpips"].append(self.lpips(cc_colors_p, pixels_p))
+                    metrics["cc_lpips"].append(
+                        self.lpips(cc_colors_p, pixels_p))
 
         if world_rank == 0:
             ellipse_time /= len(valloader)
@@ -1223,6 +1245,8 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         step = ckpts[0]["step"]
         runner.eval(step=step)
         runner.render_traj(step=step)
+        if cfg.save_ply:
+            runner.save_ply(step=cfg.ply_steps[-1])
         if cfg.compression is not None:
             runner.run_compression(step=step)
     else:
