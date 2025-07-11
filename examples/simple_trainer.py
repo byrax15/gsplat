@@ -159,8 +159,12 @@ class Config:
     opacity_reg: float = 0.0
     # Scale regularization
     scale_reg: float = 0.0
+    # Discourage gaussians to be elongated without penalizing size
+    elongation_reg: float = 0.0
     # Smoke regularization: nudges greyish gaussians to be more transparent
     smoke_reg: float = 0.0
+    # Smoke regularization: threshold at which the max/min ratio will flag a gaussian as grey
+    smoke_grey_threshold: float = 1.5
     
     # Enable camera optimization.
     pose_opt: bool = False
@@ -747,11 +751,17 @@ class Runner:
             if cfg.scale_reg > 0.0:
                 loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
             # TODO isotropy reg
+            if cfg.elongation_reg:
+                elongation = self.splats['scales'].max(1).values / self.splats['scales'].min(1).values - 1
+                loss += cfg.elongation_reg * elongation.abs().mean()
             # TODO tones of gray reg
-            # TODO density reg
             if cfg.smoke_reg:
-                breakpoint()
-                sh0 = self.splats['sh0']
+                # sh0 [N x 1 x 3]
+                # shN [N x sh_degree-1 x 3]
+                greys_at_sh0 = (self.splats['sh0'].max(2).values/self.splats['sh0'].min(2).values) < cfg.smoke_grey_threshold
+                if all(greys_at_sh0.shape):
+                    greys_opacities = self.splats['opacities'][greys_at_sh0.squeeze(1)]
+                    loss += cfg.smoke_reg * greys_opacities.mean()
 
             loss.backward()
 
