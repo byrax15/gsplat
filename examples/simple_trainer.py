@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import imageio
 import numpy as np
@@ -141,6 +141,8 @@ class Config:
 
     # Use random background for training to discourage transparency
     random_bkgd: bool = False
+    # use transparent GT images, and render twice each iteration, against a white and a black background, merging both losses
+    dual_bw_bg: bool = False
 
     # LR for 3D point positions
     means_lr: float = 1.6e-4
@@ -165,7 +167,7 @@ class Config:
     smoke_reg: float = 0.0
     # Smoke regularization: threshold at which the max/min ratio will flag a gaussian as grey
     smoke_grey_threshold: float = 1.5
-    
+
     # Enable camera optimization.
     pose_opt: bool = False
     # Learning rate for camera optimization
@@ -367,8 +369,13 @@ class Runner:
             split="train",
             patch_size=cfg.patch_size,
             load_depths=cfg.depth_loss,
+            image_channels=4 if cfg.dual_bw_bg else 3,
         )
-        self.valset = Dataset(self.parser, split=self.cfg.renders_split)
+        self.valset = Dataset(
+            self.parser,
+            split=self.cfg.renders_split,
+            image_channels=4 if cfg.dual_bw_bg else 3,
+        )
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
 
@@ -637,6 +644,7 @@ class Runner:
                 self.viewer.lock.acquire()
                 tic = time.time()
 
+            data: dict[str, Any]
             try:
                 data = next(trainloader_iter)
             except StopIteration:
@@ -646,7 +654,19 @@ class Runner:
             camtoworlds = camtoworlds_gt = data["camtoworld"].to(
                 device)  # [1, 4, 4]
             Ks = data["K"].to(device)  # [1, 3, 3]
-            pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
+
+            if cfg.dual_bw_bg:
+                # [1, H, W, 4] -> [H,W,4]
+                transp_gt = data["image"].to(device) / 255.0
+                fg = transp_gt[..., :3]
+                alpha = transp_gt[..., 3:4]
+                bgs = [torch.tensor(bg).to(transp_gt.device)
+                       for bg in [0., 1.]]
+                pixels = torch.cat(
+                    # [2,H,W,3]
+                    [fg * alpha + bg * (torch.tensor(1.).to(transp_gt.device) - alpha) for bg in bgs], 0)
+            else:
+                pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
             num_train_rays_per_step = (
                 pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
             )
@@ -705,6 +725,12 @@ class Runner:
                 bkgd = torch.rand(1, 3, device=device)
                 colors = colors + bkgd * (1.0 - alphas)
 
+            if cfg.dual_bw_bg:
+                bgs = [torch.tensor(bg).to(colors.device) for bg in [0., 1.]]
+                colors = torch.cat(
+                    # [2,H,W,3]
+                    [colors + bg * (torch.tensor(1.).to(colors.device) - alphas) for bg in bgs], 0)
+
             self.cfg.strategy.step_pre_backward(
                 params=self.splats,
                 optimizers=self.optimizers,
@@ -752,15 +778,18 @@ class Runner:
                 loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
             # TODO isotropy reg
             if cfg.elongation_reg:
-                elongation = self.splats['scales'].max(1).values / self.splats['scales'].min(1).values - 1
+                elongation = self.splats['scales'].max(
+                    1).values / self.splats['scales'].min(1).values - 1
                 loss += cfg.elongation_reg * elongation.abs().mean()
             # TODO tones of gray reg
             if cfg.smoke_reg:
                 # sh0 [N x 1 x 3]
                 # shN [N x sh_degree-1 x 3]
-                greys_at_sh0 = (self.splats['sh0'].max(2).values/self.splats['sh0'].min(2).values) < cfg.smoke_grey_threshold
+                greys_at_sh0 = (self.splats['sh0'].max(
+                    2).values/self.splats['sh0'].min(2).values) < cfg.smoke_grey_threshold
                 if all(greys_at_sh0.shape):
-                    greys_opacities = self.splats['opacities'][greys_at_sh0.squeeze(1)]
+                    greys_opacities = self.splats['opacities'][greys_at_sh0.squeeze(
+                        1)]
                     loss += cfg.smoke_reg * greys_opacities.mean()
 
             loss.backward()
@@ -925,7 +954,7 @@ class Runner:
                 self.viewer.update(step, num_train_rays_per_step)
 
     @torch.no_grad()
-    def save_ply(self,*, step:int, sh_degree_to_use: int | None = None):
+    def save_ply(self, *, step: int, sh_degree_to_use: int | None = None):
         """ frontend for the export_splats function.
 
             Args:
@@ -991,7 +1020,7 @@ class Runner:
 
             torch.cuda.synchronize()
             tic = time.time()
-            colors, _, _ = self.rasterize_splats(
+            colors, alphas, _ = self.rasterize_splats(
                 camtoworlds=camtoworlds,
                 Ks=Ks,
                 width=width,
@@ -1005,6 +1034,20 @@ class Runner:
             ellipse_time += max(time.time() - tic, 1e-10)
 
             colors = torch.clamp(colors, 0.0, 1.0)
+
+            if self.cfg.dual_bw_bg:
+                pixels = torch.cat(
+                    [pixels[..., :3]*pixels[..., 3:4] + torch.tensor(bg).to(pixels.device)
+                     * (torch.tensor(1.).to(pixels.device)-pixels[..., 3:4])
+                     for bg in [0.]],
+                    0
+                )
+                colors = torch.cat(
+                    [colors + torch.tensor(bg).to(colors.device)
+                     * (torch.tensor(1.).to(colors.device)-alphas)
+                     for bg in [0.]],
+                    0)
+
             canvas_list = [pixels, colors]
 
             if world_rank == 0:
