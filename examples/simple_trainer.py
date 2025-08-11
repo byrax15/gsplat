@@ -141,7 +141,9 @@ class Config:
 
     # Use random background for training to discourage transparency
     random_bkgd: bool = False
-    # use transparent GT images, and render twice each iteration, against a white and a black background, merging both losses
+    # use transparent GT images, and render twice each iteration, against two backgrounds, merging both losses
+    dual_bg: None | list[tuple[float,float,float]] = None
+    # short-hand for dual background with black and white, ie: --dual-bg 0 0 0 255 255 255
     dual_bw_bg: bool = False
 
     # LR for 3D point positions
@@ -354,6 +356,11 @@ class Runner:
         self.ply_dir = f"{cfg.result_dir}/ply"
         os.makedirs(self.ply_dir, exist_ok=True)
 
+        if cfg.dual_bw_bg and cfg.dual_bg:
+            raise ValueError("Cannot use both --dual-bw-bg and --dual-bg at the same time.")
+        elif cfg.dual_bw_bg and not cfg.dual_bg:
+            cfg.dual_bg = ((0., 0., 0.), (1.,1.,1.))
+
         # Tensorboard
         self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
 
@@ -369,12 +376,12 @@ class Runner:
             split="train",
             patch_size=cfg.patch_size,
             load_depths=cfg.depth_loss,
-            image_channels=4 if cfg.dual_bw_bg else 3,
+            image_channels=4 if cfg.dual_bg else 3,
         )
         self.valset = Dataset(
             self.parser,
             split=self.cfg.renders_split,
-            image_channels=4 if cfg.dual_bw_bg else 3,
+            image_channels=4 if cfg.dual_bg else 3,
         )
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
@@ -655,13 +662,13 @@ class Runner:
                 device)  # [1, 4, 4]
             Ks = data["K"].to(device)  # [1, 3, 3]
 
-            if cfg.dual_bw_bg:
+            if cfg.dual_bg:
                 # [1, H, W, 4] -> [H,W,4]
                 transp_gt = data["image"].to(device) / 255.0
                 fg = transp_gt[..., :3]
                 alpha = transp_gt[..., 3:4]
                 bgs = [torch.tensor(bg).to(transp_gt.device)
-                       for bg in [0., 1.]]
+                       for bg in cfg.dual_bg]
                 pixels = torch.cat(
                     # [2,H,W,3]
                     [fg * alpha + bg * (torch.tensor(1.).to(transp_gt.device) - alpha) for bg in bgs], 0)
@@ -725,8 +732,8 @@ class Runner:
                 bkgd = torch.rand(1, 3, device=device)
                 colors = colors + bkgd * (1.0 - alphas)
 
-            if cfg.dual_bw_bg:
-                bgs = [torch.tensor(bg).to(colors.device) for bg in [0., 1.]]
+            if cfg.dual_bg:
+                bgs = [torch.tensor(bg).to(colors.device) for bg in cfg.dual_bg]
                 colors = torch.cat(
                     # [2,H,W,3]
                     [colors + bg * (torch.tensor(1.).to(colors.device) - alphas) for bg in bgs], 0)
@@ -1035,17 +1042,17 @@ class Runner:
 
             colors = torch.clamp(colors, 0.0, 1.0)
 
-            if self.cfg.dual_bw_bg:
+            if self.cfg.dual_bg:
                 pixels = torch.cat(
                     [pixels[..., :3]*pixels[..., 3:4] + torch.tensor(bg).to(pixels.device)
                      * (torch.tensor(1.).to(pixels.device)-pixels[..., 3:4])
-                     for bg in [0.]],
+                     for bg in self.cfg.dual_bg[0:1]],
                     0
                 )
                 colors = torch.cat(
                     [colors + torch.tensor(bg).to(colors.device)
                      * (torch.tensor(1.).to(colors.device)-alphas)
-                     for bg in [0.]],
+                     for bg in self.cfg.dual_bg[0:1]],
                     0)
 
             canvas_list = [pixels, colors]
