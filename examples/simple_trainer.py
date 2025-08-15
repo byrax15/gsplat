@@ -35,7 +35,7 @@ from gsplat.compression import PngCompression
 from gsplat.distributed import cli
 from gsplat.optimizers import SelectiveAdam
 from gsplat.rendering import rasterization
-from gsplat.strategy import DefaultStrategy, MCMCStrategy
+from gsplat.strategy import DefaultStrategy, MCMCStrategy, BudgetStrategy
 from gsplat_viewer import GsplatViewer, GsplatRenderTabState
 from nerfview import CameraState, RenderTabState, apply_float_colormap
 
@@ -127,7 +127,7 @@ class Config:
     far_plane: float = 1e10
 
     # Strategy for GS densification
-    strategy: Union[DefaultStrategy, MCMCStrategy] = field(
+    strategy: Union[DefaultStrategy, MCMCStrategy, BudgetStrategy] = field(
         default_factory=DefaultStrategy
     )
     # Use packed mode for rasterization, this leads to less memory usage but slightly slower.
@@ -169,6 +169,8 @@ class Config:
     smoke_reg: float = 0.0
     # Smoke regularization: threshold at which the max/min ratio will flag a gaussian as grey
     smoke_grey_threshold: float = 1.5
+    opacity_target_reg: float = 0.0
+    opacity_target: float = .5
 
     # Enable camera optimization.
     pose_opt: bool = False
@@ -783,13 +785,18 @@ class Runner:
                     torch.sigmoid(self.splats["opacities"]).mean()
             if cfg.scale_reg > 0.0:
                 loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
-            # TODO isotropy reg
             if cfg.elongation_reg:
                 elongation = self.splats['scales'].max(
                     1).values / self.splats['scales'].min(1).values - 1
                 loss += cfg.elongation_reg * elongation.abs().mean()
-            # TODO tones of gray reg
+            if cfg.opacity_target_reg > 0.:
+                # mean distance of opacities to target opacity
+                opa_diff = torch.sigmoid(self.splats["opacities"].flatten()) - torch.tensor(cfg.opacity_target).to(self.splats["opacities"].device)
+                distance = opa_diff.abs().mean()
+                loss += cfg.opacity_target_reg * distance
+
             if cfg.smoke_reg:
+                # TODO tones of gray reg
                 # sh0 [N x 1 x 3]
                 # shN [N x sh_degree-1 x 3]
                 greys_at_sh0 = (self.splats['sh0'].max(
@@ -1350,6 +1357,10 @@ if __name__ == "__main__":
                 strategy=MCMCStrategy(verbose=True),
             ),
         ),
+        'budget': (
+            "Gaussian splatting training using densification heuristics from the original paper, supplemented with budget heuristics",
+            Config(strategy=BudgetStrategy(verbose=True)),
+        )
     }
     cfg = tyro.extras.overridable_config_cli(configs)
     cfg.adjust_steps(cfg.steps_scaler)
