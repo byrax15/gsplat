@@ -125,6 +125,10 @@ class Config:
 
     # Use random background for training to discourage transparency
     random_bkgd: bool = False
+    # use transparent GT images, and render twice each iteration, against two backgrounds, merging both losses
+    dual_bg: None | list[tuple[float, float, float]] = None
+    # short-hand for dual background with black and white, ie: --dual-bg 0 0 0 255 255 255
+    dual_bw_bg: bool = False
 
     # Enable camera optimization.
     pose_opt: bool = False
@@ -273,6 +277,13 @@ class Runner:
         # Tensorboard
         self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
 
+        if cfg.dual_bw_bg and cfg.dual_bg:
+            raise ValueError(
+                "Cannot use both --dual-bw-bg and --dual-bg at the same time."
+            )
+        elif cfg.dual_bw_bg and not cfg.dual_bg:
+            cfg.dual_bg = [(0.0, 0.0, 0.0), (1.0, 1.0, 1.0)]
+
         # Load data: Training data should contain initial points and colors.
         self.parser = Parser(
             data_dir=cfg.data_dir,
@@ -285,8 +296,11 @@ class Runner:
             split="train",
             patch_size=cfg.patch_size,
             load_depths=cfg.depth_loss,
+            image_channels=4 if cfg.dual_bg else 3,
         )
-        self.valset = Dataset(self.parser, split="val")
+        self.valset = Dataset(
+            self.parser, split="val", image_channels=4 if cfg.dual_bg else 3
+        )
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
 
@@ -525,7 +539,18 @@ class Runner:
 
             camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
             Ks = data["K"].to(device)  # [1, 3, 3]
-            pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
+            if cfg.dual_bg:
+                # [1, H, W, 4] -> [H,W,4]
+                transp_gt = data["image"].to(device) / 255.0
+                fg = transp_gt[..., :3]
+                alpha = transp_gt[..., 3:4]
+                bgs = [torch.tensor(bg).to(transp_gt.device)
+                       for bg in cfg.dual_bg]
+                pixels = torch.cat(
+                    # [2,H,W,3]
+                    [fg * alpha + bg * (torch.tensor(1.).to(transp_gt.device) - alpha) for bg in bgs], 0)
+            else:
+                pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
             num_train_rays_per_step = (
                 pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
             )
@@ -574,6 +599,12 @@ class Runner:
             if cfg.random_bkgd:
                 bkgd = torch.rand(1, 3, device=device)
                 colors = colors + bkgd * (1.0 - alphas)
+
+            if cfg.dual_bg:
+                bgs = [torch.tensor(bg).to(colors.device) for bg in cfg.dual_bg]
+                colors = torch.cat(
+                    # [2,H,W,3]
+                    [colors + bg * (torch.tensor(1.).to(colors.device) - alphas) for bg in bgs], 0)
 
             self.strategy.step_pre_backward(
                 params=self.splats,
@@ -762,6 +793,7 @@ class Runner:
         for i, data in enumerate(valloader):
             camtoworlds = data["camtoworld"].to(device)
             Ks = data["K"].to(device)
+            
             pixels = data["image"].to(device) / 255.0
             height, width = pixels.shape[1:3]
 
@@ -789,6 +821,19 @@ class Runner:
             colors = colors[..., :3]  # Take RGB channels
             torch.cuda.synchronize()
             ellipse_time += max(time.time() - tic, 1e-10)
+
+            if self.cfg.dual_bg:
+                pixels = torch.cat(
+                    [pixels[..., :3]*pixels[..., 3:4] + torch.tensor(bg).to(pixels.device)
+                     * (torch.tensor(1.).to(pixels.device)-pixels[..., 3:4])
+                     for bg in self.cfg.dual_bg[0:1]],
+                    0
+                )
+                colors = torch.cat(
+                    [colors + torch.tensor(bg).to(colors.device)
+                     * (torch.tensor(1.).to(colors.device)-alphas)
+                     for bg in self.cfg.dual_bg[0:1]],
+                    0)
 
             # write images
             canvas = torch.cat([pixels, colors], dim=2).squeeze(0).cpu().numpy()
@@ -871,6 +916,8 @@ class Runner:
         }
         with open(f"{self.stats_dir}/val_step{step:04d}.json", "w") as f:
             json.dump(stats, f)
+        torch.save(
+            metrics, f"{self.stats_dir}/val_percam_step{step:04d}.pt")
         # save stats to tensorboard
         for k, v in stats.items():
             self.writer.add_scalar(f"val/{k}", v, step)
