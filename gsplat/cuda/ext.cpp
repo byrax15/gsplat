@@ -11,6 +11,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .value("FISHEYE", gsplat::CameraModelType::FISHEYE)
         .value("FTHETA", gsplat::CameraModelType::FTHETA)
         .export_values();
+        
+    py::enum_<gsplat::KernelT>(m, "KernelT")
+        .value("GAUSSIAN", gsplat::KernelT::GAUSSIAN)
+        .value("EPANECH", gsplat::KernelT::EPANECH)
+        .export_values();
 
     m.def("null", &gsplat::null);
 

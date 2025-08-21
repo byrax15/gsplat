@@ -234,7 +234,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     const uint32_t tile_size,
     // intersections
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
-    const at::Tensor flatten_ids   // [n_isects]
+    const at::Tensor flatten_ids,  // [n_isects]
+    const KernelT kernel_t = KernelT::GAUSSIAN
 );
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 rasterize_to_pixels_3dgs_bwd(
@@ -259,7 +260,8 @@ rasterize_to_pixels_3dgs_bwd(
     const at::Tensor v_render_colors, // [..., image_height, image_width, 3]
     const at::Tensor v_render_alphas, // [..., image_height, image_width, 1]
     // options
-    bool absgrad
+    bool absgrad,
+    const KernelT kernel_t = KernelT::GAUSSIAN
 );
 
 // Rasterize 3D Gaussian, but only return the indices of gaussians and pixels.

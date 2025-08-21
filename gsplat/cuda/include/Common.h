@@ -50,6 +50,11 @@ enum CameraModelType {
     FTHETA = 3,
 };
 
+enum KernelT {
+    GAUSSIAN,
+    EPANECH,
+};
+
 #define N_THREADS_PACKED 256
 #define ALPHA_THRESHOLD (1.f / 255.f)
 

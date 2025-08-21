@@ -8,6 +8,7 @@ from torch import Tensor
 from typing_extensions import Literal
 
 from .cuda._wrapper import (
+    KernelT,
     RollingShutterType,
     FThetaCameraDistortionParameters,
     FThetaPolynomialType,
@@ -67,6 +68,7 @@ def rasterization(
     # rolling shutter
     rolling_shutter: RollingShutterType = RollingShutterType.GLOBAL,
     viewmats_rs: Optional[Tensor] = None,  # [..., C, 4, 4]
+    kernel_t: KernelT = KernelT.GAUSSIAN,
 ) -> Tuple[Tensor, Tensor, Dict]:
     """Rasterize a set of 3D Gaussians (N) to a batch of image planes (C).
 
@@ -713,6 +715,7 @@ def rasterization(
                     backgrounds=backgrounds_chunk,
                     packed=packed,
                     absgrad=absgrad,
+                    kernel_t=kernel_t,
                 )
             render_colors.append(render_colors_)
             render_alphas.append(render_alphas_)
@@ -756,6 +759,7 @@ def rasterization(
                 backgrounds=backgrounds,
                 packed=packed,
                 absgrad=absgrad,
+                kernel_t=kernel_t,
             )
     if render_mode in ["ED", "RGB+ED"]:
         # normalize the accumulated depth to get the expected depth

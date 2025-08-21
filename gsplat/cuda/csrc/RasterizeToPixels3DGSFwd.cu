@@ -14,7 +14,10 @@ namespace cg = cooperative_groups;
 // Forward
 ////////////////////////////////////////////////////////////////
 
-template <uint32_t CDIM, typename scalar_t>
+template <
+    uint32_t CDIM,
+    typename scalar_t,
+    KernelT kernel_t = KernelT::GAUSSIAN>
 __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
     const uint32_t I,
     const uint32_t N,
@@ -142,13 +145,34 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
             const vec3 xy_opac = xy_opacity_batch[t];
             const float opac = xy_opac.z;
             const vec2 delta = {xy_opac.x - px, xy_opac.y - py};
-            const float sigma = 0.5f * (conic.x * delta.x * delta.x +
-                                        conic.z * delta.y * delta.y) +
-                                conic.y * delta.x * delta.y;
-            float alpha = min(0.999f, opac * __expf(-sigma));
-            if (sigma < 0.f || alpha < ALPHA_THRESHOLD) {
-                continue;
+
+            // Common Mahalanobis terms
+            const float dx2 = delta.x * delta.x;
+            const float dy2 = delta.y * delta.y;
+            const float dxdy = delta.x * delta.y;
+
+            static_assert(kernel_t == KernelT::GAUSSIAN || kernel_t == KernelT::EPANECH,
+                          "Unknown kernel type for rasterize_to_pixels_3dgs_fwd_kernel");
+
+            float alpha;
+            if constexpr (kernel_t == KernelT::GAUSSIAN) {
+                float sigma = 0.5f * (conic.x * dx2 + conic.z * dy2) + conic.y * dxdy;
+                if (sigma < 0.f) {
+                    alpha = 0.0f;
+                } else {
+                    alpha = min(0.999f, opac * __expf(-sigma));
+                }
+            } else if constexpr (kernel_t == KernelT::EPANECH) {
+                float u2 = conic.x * dx2 + conic.z * dy2 + 2.0f * conic.y * dxdy;
+                if (u2 > 1.0f) {
+                    alpha = 0.0f;
+                } else {
+                    alpha = min(0.999f, opac * 0.75f * (1.0f - u2));
+                }
             }
+
+            if (alpha < ALPHA_THRESHOLD)
+                continue;
 
             const float next_T = T * (1.0f - alpha);
             if (next_T <= 1e-4f) { // this pixel is done: exclusive
@@ -164,7 +188,6 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
                 pix_out[k] += c_ptr[k] * vis;
             }
             cur_idx = batch_start + t;
-
             T = next_T;
         }
     }
@@ -195,7 +218,7 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
     const at::Tensor colors,    // [..., N, channels] or [nnz, channels]
     const at::Tensor opacities, // [..., N]  or [nnz]
     const at::optional<at::Tensor> backgrounds, // [..., channels]
-    const at::optional<at::Tensor> masks,       // [..., tile_height, tile_width]
+    const at::optional<at::Tensor> masks, // [..., tile_height, tile_width]
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
@@ -204,14 +227,16 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
     const at::Tensor flatten_ids,  // [n_isects]
     // outputs
-    at::Tensor renders, // [..., image_height, image_width, channels]
-    at::Tensor alphas,  // [..., image_height, image_width]
-    at::Tensor last_ids // [..., image_height, image_width]
+    at::Tensor renders,  // [..., image_height, image_width, channels]
+    at::Tensor alphas,   // [..., image_height, image_width]
+    at::Tensor last_ids, // [..., image_height, image_width]
+    const KernelT kernel_t
 ) {
     bool packed = means2d.dim() == 2;
 
     uint32_t N = packed ? 0 : means2d.size(-2); // number of gaussians
-    uint32_t I = alphas.numel() / (image_height * image_width); // number of images
+    uint32_t I =
+        alphas.numel() / (image_height * image_width); // number of images
     uint32_t tile_height = tile_offsets.size(-2);
     uint32_t tile_width = tile_offsets.size(-1);
     uint32_t n_isects = flatten_ids.size(0);
@@ -239,30 +264,46 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
         );
     }
 
-    rasterize_to_pixels_3dgs_fwd_kernel<CDIM, float>
-        <<<grid, threads, shmem_size, at::cuda::getCurrentCUDAStream()>>>(
-            I,
-            N,
-            n_isects,
-            packed,
-            reinterpret_cast<vec2 *>(means2d.data_ptr<float>()),
-            reinterpret_cast<vec3 *>(conics.data_ptr<float>()),
-            colors.data_ptr<float>(),
-            opacities.data_ptr<float>(),
-            backgrounds.has_value() ? backgrounds.value().data_ptr<float>()
-                                    : nullptr,
-            masks.has_value() ? masks.value().data_ptr<bool>() : nullptr,
-            image_width,
-            image_height,
-            tile_size,
-            tile_width,
-            tile_height,
-            tile_offsets.data_ptr<int32_t>(),
-            flatten_ids.data_ptr<int32_t>(),
-            renders.data_ptr<float>(),
-            alphas.data_ptr<float>(),
-            last_ids.data_ptr<int32_t>()
-        );
+#define CASE_LAUNCH_FWD(KERNEL_T)                                              \
+    case KERNEL_T:                                                             \
+        rasterize_to_pixels_3dgs_fwd_kernel<CDIM, float, KERNEL_T>             \
+            <<<grid, threads, shmem_size, at::cuda::getCurrentCUDAStream()>>>( \
+                I,                                                             \
+                N,                                                             \
+                n_isects,                                                      \
+                packed,                                                        \
+                reinterpret_cast<vec2 *>(means2d.data_ptr<float>()),           \
+                reinterpret_cast<vec3 *>(conics.data_ptr<float>()),            \
+                colors.data_ptr<float>(),                                      \
+                opacities.data_ptr<float>(),                                   \
+                backgrounds.has_value()                                        \
+                    ? backgrounds.value().data_ptr<float>()                    \
+                    : nullptr,                                                 \
+                masks.has_value() ? masks.value().data_ptr<bool>() : nullptr,  \
+                image_width,                                                   \
+                image_height,                                                  \
+                tile_size,                                                     \
+                tile_width,                                                    \
+                tile_height,                                                   \
+                tile_offsets.data_ptr<int32_t>(),                              \
+                flatten_ids.data_ptr<int32_t>(),                               \
+                renders.data_ptr<float>(),                                     \
+                alphas.data_ptr<float>(),                                      \
+                last_ids.data_ptr<int32_t>()                                   \
+            );                                                                 \
+        break;
+
+    switch (kernel_t) {
+        CASE_LAUNCH_FWD(KernelT::GAUSSIAN)
+        CASE_LAUNCH_FWD(KernelT::EPANECH)
+        default:
+            AT_ERROR(
+                "Unknown kernel type for rasterize_to_pixels_3dgs_fwd_kernel: ",
+                static_cast<int>(kernel_t)
+            );
+    }
+
+#undef CASE_LAUNCH_FWD
 }
 
 // Explicit Instantiation: this should match how it is being called in .cpp
@@ -283,7 +324,8 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
         const at::Tensor flatten_ids,                                          \
         at::Tensor renders,                                                    \
         at::Tensor alphas,                                                     \
-        at::Tensor last_ids                                                    \
+        at::Tensor last_ids,                                                   \
+        const KernelT kernel_t                                                 \
     );
 
 __INS__(1)

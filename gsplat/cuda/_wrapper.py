@@ -29,6 +29,15 @@ def _make_lazy_cuda_obj(name: str) -> Any:
     return obj
 
 
+@dataclass
+class KernelT(Enum):
+    GAUSSIAN = 0
+    EPANECH = 1
+
+    def to_cpp(self) -> Any:
+        return _make_lazy_cuda_obj(f"KernelT.{self.name}")
+
+
 class RollingShutterType(Enum):
     ROLLING_TOP_TO_BOTTOM = 0
     ROLLING_LEFT_TO_RIGHT = 1
@@ -554,6 +563,7 @@ def rasterize_to_pixels(
     masks: Optional[Tensor] = None,  # [..., tile_height, tile_width]
     packed: bool = False,
     absgrad: bool = False,
+    kernel_t: KernelT = KernelT.GAUSSIAN,
 ) -> Tuple[Tensor, Tensor]:
     """Rasterizes Gaussians to pixels.
 
@@ -668,6 +678,7 @@ def rasterize_to_pixels(
         isect_offsets.contiguous(),
         flatten_ids.contiguous(),
         absgrad,
+        kernel_t,
     )
 
     if padded_channels > 0:
@@ -1239,9 +1250,11 @@ def fully_fused_projection_with_ut(
         radial_coeffs.contiguous() if radial_coeffs is not None else None,
         tangential_coeffs.contiguous() if tangential_coeffs is not None else None,
         thin_prism_coeffs.contiguous() if thin_prism_coeffs is not None else None,
-        ftheta_coeffs.to_cpp()
-        if ftheta_coeffs is not None
-        else FThetaCameraDistortionParameters.to_cpp_default(),
+        (
+            ftheta_coeffs.to_cpp()
+            if ftheta_coeffs is not None
+            else FThetaCameraDistortionParameters.to_cpp_default()
+        ),
     )
     if not calc_compensations:
         compensations = None
@@ -1266,6 +1279,7 @@ class _RasterizeToPixels(torch.autograd.Function):
         isect_offsets: Tensor,  # [..., tile_height, tile_width]
         flatten_ids: Tensor,  # [n_isects]
         absgrad: bool,
+        kernel_t: KernelT = KernelT.GAUSSIAN,
     ) -> Tuple[Tensor, Tensor]:
         render_colors, render_alphas, last_ids = _make_lazy_cuda_func(
             "rasterize_to_pixels_3dgs_fwd"
@@ -1281,6 +1295,7 @@ class _RasterizeToPixels(torch.autograd.Function):
             tile_size,
             isect_offsets,
             flatten_ids,
+            kernel_t.to_cpp(),
         )
 
         ctx.save_for_backward(
@@ -1299,6 +1314,7 @@ class _RasterizeToPixels(torch.autograd.Function):
         ctx.height = height
         ctx.tile_size = tile_size
         ctx.absgrad = absgrad
+        ctx.kernel_t = kernel_t
 
         # double to float
         render_alphas = render_alphas.float()
@@ -1326,6 +1342,7 @@ class _RasterizeToPixels(torch.autograd.Function):
         height = ctx.height
         tile_size = ctx.tile_size
         absgrad = ctx.absgrad
+        kernel_t = ctx.kernel_t
 
         (
             v_means2d_abs,
@@ -1350,6 +1367,7 @@ class _RasterizeToPixels(torch.autograd.Function):
             v_render_colors.contiguous(),
             v_render_alphas.contiguous(),
             absgrad,
+            kernel_t.to_cpp()
         )
 
         if absgrad:
@@ -1509,9 +1527,13 @@ class _RasterizeToPixelsEval3D(torch.autograd.Function):
         tile_size = ctx.tile_size
         ftheta_coeffs = ctx.ftheta_coeffs
 
-        (v_means, v_quats, v_scales, v_colors, v_opacities,) = _make_lazy_cuda_func(
-            "rasterize_to_pixels_from_world_3dgs_bwd"
-        )(
+        (
+            v_means,
+            v_quats,
+            v_scales,
+            v_colors,
+            v_opacities,
+        ) = _make_lazy_cuda_func("rasterize_to_pixels_from_world_3dgs_bwd")(
             means,
             quats,
             scales,

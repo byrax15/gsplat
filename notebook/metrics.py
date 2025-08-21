@@ -1,11 +1,15 @@
+from dataclasses import dataclass
+from glob import glob
 import json
 import pathlib
+from typing import Any
 import torch
 import pandas as pd
 import re
+import sys
 
 
-def get_stats():
+def get_stats(experiment_glob: str):
     scene_match = re.compile(
         r"(?P<scene>(cloud[+]small)|(fire[+]smoke)|(teapot)|(cube))"
     )
@@ -13,22 +17,26 @@ def get_stats():
     extra_indep_vars_matches = {
         k: (re.compile(v), default)
         for k, (v, default) in {
-            "min-target": (r"min-target=(?P<mintarget>\d+)", None),
-            "max-target": (r"max-target=(?P<maxtarget>\d+)", None),
-            "prune-opa": (r"prune-opa=(?P<pruneopa>\d+)", 5e-3),
+            # "min-target": (r"min-target=(?P<mintarget>\d+)", None),
+            # "max-target": (r"max-target=(?P<maxtarget>\d+)", None),
+            # "prune-opa": (r"prune-opa=(?P<pruneopa>[+-]?\d*\.?\d+([eE][+-]?\d+)?)", Exception('Prune-Opa Not Found')),
+            # "density-reg": (
+            #     r"density-reg=(?P<densityreg>[+-]?\d*\.?\d+([eE][+-]?\d+)?)",
+            #     None,
+            # ),
+            # "density-cells": (r"density-cells=(?P<densitycells>\d+)", None),
         }.items()
     }
 
-    model = pathlib.Path("/home/aq85800/NewVolume/gsplat")
     for i, frame in enumerate(
         sorted(
-            model.glob("budget+min-target=*+dual-bw-bg/*/colmap_*"),
+            [pathlib.Path(f) for f in glob(experiment_glob)],
             key=lambda f: f.name,
         )
     ):
         try:
             last_stats = sorted(
-                frame.glob("*/stats/val_percam_step*.pt"),
+                frame.glob("stats/val_percam_step*.pt"),
                 key=lambda f: f.stat().st_mtime,
             )[-1]
             averages = sorted(
@@ -49,7 +57,10 @@ def get_stats():
         extra_indep_vars = {}
         for k, (matcher, default) in extra_indep_vars_matches.items():
             if match := matcher.search(str(last_stats)):
-                extra_indep_vars[k] = int(match.group(1))
+                extra_indep_vars[k] = match.group(1)
+            elif isinstance(default, Exception):
+                default.add_note("\tin line: " + str(last_stats))
+                raise default
             elif default is not None:
                 extra_indep_vars[k] = default
 
@@ -68,5 +79,15 @@ def get_stats():
         }
 
 
-data = pd.DataFrame(get_stats())
-print(data.to_csv(index=False))
+def main(
+    experiment_glob: str,
+    /,
+):
+    data = pd.DataFrame(get_stats(experiment_glob))
+    print(data.to_csv(index=False))
+
+
+if __name__ == "__main__":
+    import tyro
+
+    tyro.cli(main)

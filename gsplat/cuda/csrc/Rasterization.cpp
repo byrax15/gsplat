@@ -6,10 +6,10 @@
 #include <ATen/Functions.h>
 #include <ATen/NativeFunctions.h>
 
+#include "Cameras.h"
 #include "Common.h"
 #include "Ops.h"
 #include "Rasterization.h"
-#include "Cameras.h"
 
 namespace gsplat {
 
@@ -24,14 +24,15 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     const at::Tensor colors,    // [..., N, channels] or [nnz, channels]
     const at::Tensor opacities, // [..., N]  or [nnz]
     const at::optional<at::Tensor> backgrounds, // [..., channels]
-    const at::optional<at::Tensor> masks,       // [..., tile_height, tile_width]
+    const at::optional<at::Tensor> masks, // [..., tile_height, tile_width]
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
     const uint32_t tile_size,
     // intersections
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
-    const at::Tensor flatten_ids   // [n_isects]
+    const at::Tensor flatten_ids,  // [n_isects]
+    const KernelT kernel_t
 ) {
     DEVICE_GUARD(means2d);
     CHECK_INPUT(means2d);
@@ -48,7 +49,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     }
 
     auto opt = means2d.options();
-    at::DimVector image_dims(tile_offsets.sizes().slice(0, tile_offsets.dim() - 2));
+    at::DimVector image_dims(
+        tile_offsets.sizes().slice(0, tile_offsets.dim() - 2)
+    );
     uint32_t channels = colors.size(-1);
 
     at::DimVector renders_dims(image_dims);
@@ -79,7 +82,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
             flatten_ids,                                                       \
             renders,                                                           \
             alphas,                                                            \
-            last_ids                                                           \
+            last_ids,                                                          \
+            kernel_t                                                           \
         );                                                                     \
         break;
 
@@ -117,12 +121,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 rasterize_to_pixels_3dgs_bwd(
     // Gaussian parameters
-    const at::Tensor means2d,                   // [..., N, 2] or [nnz, 2]
-    const at::Tensor conics,                    // [..., N, 3] or [nnz, 3]
-    const at::Tensor colors,                    // [..., N, channels] or [nnz, channels]
-    const at::Tensor opacities,                 // [..., N] or [nnz]
+    const at::Tensor means2d,   // [..., N, 2] or [nnz, 2]
+    const at::Tensor conics,    // [..., N, 3] or [nnz, 3]
+    const at::Tensor colors,    // [..., N, channels] or [nnz, channels]
+    const at::Tensor opacities, // [..., N] or [nnz]
     const at::optional<at::Tensor> backgrounds, // [..., channels]
-    const at::optional<at::Tensor> masks,       // [..., tile_height, tile_width]
+    const at::optional<at::Tensor> masks, // [..., tile_height, tile_width]
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
@@ -134,10 +138,12 @@ rasterize_to_pixels_3dgs_bwd(
     const at::Tensor render_alphas, // [..., image_height, image_width, 1]
     const at::Tensor last_ids,      // [..., image_height, image_width]
     // gradients of outputs
-    const at::Tensor v_render_colors, // [..., image_height, image_width, channels]
+    const at::Tensor
+        v_render_colors, // [..., image_height, image_width, channels]
     const at::Tensor v_render_alphas, // [..., image_height, image_width, 1]
     // options
-    bool absgrad
+    bool absgrad,
+    const KernelT kernel_t
 ) {
     DEVICE_GUARD(means2d);
     CHECK_INPUT(means2d);
@@ -190,7 +196,8 @@ rasterize_to_pixels_3dgs_bwd(
             v_means2d,                                                         \
             v_conics,                                                          \
             v_colors,                                                          \
-            v_opacities                                                        \
+            v_opacities,                                                       \
+            kernel_t                                                           \
         );                                                                     \
         break;
 
@@ -251,7 +258,7 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_3dgs(
     CHECK_INPUT(flatten_ids);
 
     auto opt = means2d.options();
-    uint32_t N = means2d.size(-2); // number of gaussians
+    uint32_t N = means2d.size(-2);          // number of gaussians
     uint32_t I = means2d.numel() / (2 * N); // number of images
 
     uint32_t n_isects = flatten_ids.size(0);
@@ -260,9 +267,8 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_3dgs(
     int64_t n_elems;
     at::Tensor chunk_starts;
     if (n_isects) {
-        at::Tensor chunk_cnts = at::zeros(
-            {I * image_height * image_width}, opt.dtype(at::kInt)
-        );
+        at::Tensor chunk_cnts =
+            at::zeros({I * image_height * image_width}, opt.dtype(at::kInt));
         launch_rasterize_to_indices_3dgs_kernel(
             range_start,
             range_end,
@@ -332,7 +338,7 @@ rasterize_to_pixels_2dgs_fwd(
     const at::Tensor opacities,      // [..., N]  or [nnz]
     const at::Tensor normals,        // [..., N, 3] or [nnz, 3]
     const at::optional<at::Tensor> backgrounds, // [..., channels]
-    const at::optional<at::Tensor> masks,       // [..., tile_height, tile_width]
+    const at::optional<at::Tensor> masks, // [..., tile_height, tile_width]
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
@@ -357,7 +363,9 @@ rasterize_to_pixels_2dgs_fwd(
     }
     auto opt = means2d.options();
 
-    at::DimVector image_dims(tile_offsets.sizes().slice(0, tile_offsets.dim() - 2));
+    at::DimVector image_dims(
+        tile_offsets.sizes().slice(0, tile_offsets.dim() - 2)
+    );
     uint32_t channels = colors.size(-1);
 
     at::DimVector renders_dims(image_dims);
@@ -469,7 +477,7 @@ rasterize_to_pixels_2dgs_bwd(
     const at::Tensor normals,        // [..., N, 3] or [nnz, 3]
     const at::Tensor densify,
     const at::optional<at::Tensor> backgrounds, // [..., channels]
-    const at::optional<at::Tensor> masks,       // [..., tile_height, tile_width]
+    const at::optional<at::Tensor> masks, // [..., tile_height, tile_width]
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
@@ -478,12 +486,14 @@ rasterize_to_pixels_2dgs_bwd(
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
     const at::Tensor flatten_ids,  // [n_isects]
     // forward outputs
-    const at::Tensor render_colors, // [..., image_height, image_width, channels]
+    const at::Tensor
+        render_colors, // [..., image_height, image_width, channels]
     const at::Tensor render_alphas, // [..., image_height, image_width, 1]
     const at::Tensor last_ids,      // [..., image_height, image_width]
     const at::Tensor median_ids,    // [..., image_height, image_width]
     // gradients of outputs
-    const at::Tensor v_render_colors,  // [..., image_height, image_width, channels]
+    const at::Tensor
+        v_render_colors, // [..., image_height, image_width, channels]
     const at::Tensor v_render_alphas,  // [..., image_height, image_width, 1]
     const at::Tensor v_render_normals, // [..., image_height, image_width, 3]
     const at::Tensor v_render_distort, // [..., image_height, image_width, 1]
@@ -627,7 +637,7 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_2dgs(
     CHECK_INPUT(flatten_ids);
 
     auto opt = means2d.options();
-    uint32_t N = means2d.size(-2); // number of gaussians
+    uint32_t N = means2d.size(-2);          // number of gaussians
     uint32_t I = means2d.numel() / (2 * N); // number of images
 
     uint32_t n_isects = flatten_ids.size(0);
@@ -636,9 +646,8 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_2dgs(
     int64_t n_elems;
     at::Tensor chunk_starts;
     if (n_isects) {
-        at::Tensor chunk_cnts = at::zeros(
-            {I * image_height * image_width}, opt.dtype(at::kInt)
-        );
+        at::Tensor chunk_cnts =
+            at::zeros({I * image_height * image_width}, opt.dtype(at::kInt));
         launch_rasterize_to_indices_2dgs_kernel(
             range_start,
             range_end,
@@ -692,7 +701,8 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_2dgs(
 // 3DGS (from world)
 ////////////////////////////////////////////////////
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_from_world_3dgs_fwd(
+std::tuple<at::Tensor, at::Tensor, at::Tensor>
+rasterize_to_pixels_from_world_3dgs_fwd(
     // Gaussian parameters
     const at::Tensor means,     // [..., N, 3]
     const at::Tensor quats,     // [..., N, 4]
@@ -700,23 +710,26 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_from_world_3d
     const at::Tensor colors,    // [..., C, N, channels] or [nnz, channels]
     const at::Tensor opacities, // [..., C, N] or [nnz]
     const at::optional<at::Tensor> backgrounds, // [..., C, channels]
-    const at::optional<at::Tensor> masks,       // [..., C, tile_height, tile_width]
+    const at::optional<at::Tensor> masks, // [..., C, tile_height, tile_width]
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
     const uint32_t tile_size,
     // camera
-    const at::Tensor viewmats0,               // [..., C, 4, 4]
-    const at::optional<at::Tensor> viewmats1, // [..., C, 4, 4] optional for rolling shutter
-    const at::Tensor Ks,                      // [..., C, 3, 3]
+    const at::Tensor viewmats0, // [..., C, 4, 4]
+    const at::optional<at::Tensor>
+        viewmats1,       // [..., C, 4, 4] optional for rolling shutter
+    const at::Tensor Ks, // [..., C, 3, 3]
     const CameraModelType camera_model,
     // uncented transform
     const UnscentedTransformParameters ut_params,
     ShutterType rs_type,
-    const at::optional<at::Tensor> radial_coeffs,     // [..., C, 6] or [..., C, 4] optional
+    const at::optional<at::Tensor>
+        radial_coeffs, // [..., C, 6] or [..., C, 4] optional
     const at::optional<at::Tensor> tangential_coeffs, // [..., C, 2] optional
     const at::optional<at::Tensor> thin_prism_coeffs, // [..., C, 4] optional
-    const FThetaCameraDistortionParameters ftheta_coeffs, // shared parameters for all cameras
+    const FThetaCameraDistortionParameters
+        ftheta_coeffs, // shared parameters for all cameras
     // intersections
     const at::Tensor tile_offsets, // [..., C, tile_height, tile_width]
     const at::Tensor flatten_ids   // [n_isects]
@@ -735,13 +748,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_from_world_3d
     if (masks.has_value()) {
         CHECK_INPUT(masks.value());
     }
-    
+
     auto opt = means.options();
     at::DimVector batch_dims(means.sizes().slice(0, means.dim() - 2));
-    uint32_t C = viewmats0.size(-3);     // number of cameras
+    uint32_t C = viewmats0.size(-3); // number of cameras
     // uint32_t N = means.size(-2);         // number of gaussians
     uint32_t channels = colors.size(-1);
-    assert (channels == 3); // only support RGB for now
+    assert(channels == 3); // only support RGB for now
 
     at::DimVector renders_shape(batch_dims);
     renders_shape.append({C, image_height, image_width, channels});
@@ -817,33 +830,35 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_from_world_3d
     return std::make_tuple(renders, alphas, last_ids);
 };
 
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 rasterize_to_pixels_from_world_3dgs_bwd(
     // Gaussian parameters
-    const at::Tensor means,  // [..., N, 3]
-    const at::Tensor quats,  // [..., N, 4]
-    const at::Tensor scales, // [..., N, 3]
+    const at::Tensor means,                     // [..., N, 3]
+    const at::Tensor quats,                     // [..., N, 4]
+    const at::Tensor scales,                    // [..., N, 3]
     const at::Tensor colors,                    // [..., C, N, 3] or [nnz, 3]
     const at::Tensor opacities,                 // [..., C, N] or [nnz]
     const at::optional<at::Tensor> backgrounds, // [..., C, 3]
-    const at::optional<at::Tensor> masks,       // [..., C, tile_height, tile_width]
+    const at::optional<at::Tensor> masks, // [..., C, tile_height, tile_width]
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
     const uint32_t tile_size,
     // camera
-    const at::Tensor viewmats0,               // [..., C, 4, 4]
-    const at::optional<at::Tensor> viewmats1, // [..., C, 4, 4] optional for rolling shutter
-    const at::Tensor Ks,                      // [..., C, 3, 3]
+    const at::Tensor viewmats0, // [..., C, 4, 4]
+    const at::optional<at::Tensor>
+        viewmats1,       // [..., C, 4, 4] optional for rolling shutter
+    const at::Tensor Ks, // [..., C, 3, 3]
     const CameraModelType camera_model,
     // uncented transform
     const UnscentedTransformParameters ut_params,
     ShutterType rs_type,
-    const at::optional<at::Tensor> radial_coeffs,     // [..., C, 6] or [..., C, 4] optional
+    const at::optional<at::Tensor>
+        radial_coeffs, // [..., C, 6] or [..., C, 4] optional
     const at::optional<at::Tensor> tangential_coeffs, // [..., C, 2] optional
     const at::optional<at::Tensor> thin_prism_coeffs, // [..., C, 4] optional
-    const FThetaCameraDistortionParameters ftheta_coeffs, // shared parameters for all cameras
+    const FThetaCameraDistortionParameters
+        ftheta_coeffs, // shared parameters for all cameras
     // intersections
     const at::Tensor tile_offsets, // [..., C, tile_height, tile_width]
     const at::Tensor flatten_ids,  // [n_isects]
@@ -852,7 +867,7 @@ rasterize_to_pixels_from_world_3dgs_bwd(
     const at::Tensor last_ids,      // [..., C, image_height, image_width]
     // gradients of outputs
     const at::Tensor v_render_colors, // [..., C, image_height, image_width, 3]
-    const at::Tensor v_render_alphas // [..., C, image_height, image_width, 1]
+    const at::Tensor v_render_alphas  // [..., C, image_height, image_width, 1]
 ) {
     DEVICE_GUARD(means);
     CHECK_INPUT(means);
@@ -897,12 +912,12 @@ rasterize_to_pixels_from_world_3dgs_bwd(
             viewmats0,                                                         \
             viewmats1,                                                         \
             Ks,                                                                \
-            camera_model,                                                     \
-            ut_params,                                                        \
-            rs_type,                                                       \
-            radial_coeffs,                                                    \
-            tangential_coeffs,                                                \
-            thin_prism_coeffs,                                               \
+            camera_model,                                                      \
+            ut_params,                                                         \
+            rs_type,                                                           \
+            radial_coeffs,                                                     \
+            tangential_coeffs,                                                 \
+            thin_prism_coeffs,                                                 \
             ftheta_coeffs,                                                     \
             tile_offsets,                                                      \
             flatten_ids,                                                       \
@@ -946,9 +961,7 @@ rasterize_to_pixels_from_world_3dgs_bwd(
     }
 #undef __LAUNCH_KERNEL__
 
-    return std::make_tuple(
-        v_means, v_quats, v_scales, v_colors, v_opacities
-    );
+    return std::make_tuple(v_means, v_quats, v_scales, v_colors, v_opacities);
 }
 
 } // namespace gsplat

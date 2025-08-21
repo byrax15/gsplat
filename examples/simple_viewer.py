@@ -12,6 +12,7 @@ import tqdm
 import viser
 from pathlib import Path
 from gsplat._helper import load_test_data
+from gsplat.cuda._wrapper import KernelT
 from gsplat.distributed import cli
 from gsplat.rendering import rasterization
 
@@ -56,8 +57,7 @@ def main(local_rank: int, world_rank, world_size: int, args):
         sh_degree = None
         C = len(viewmats)
         N = len(means)
-        print("rank", world_rank, "Number of Gaussians:",
-              N, "Number of Cameras:", C)
+        print("rank", world_rank, "Number of Gaussians:", N, "Number of Cameras:", C)
 
         # batched render
         for _ in tqdm.trange(1):
@@ -90,10 +90,8 @@ def main(local_rank: int, world_rank, world_size: int, args):
             torch.cat(
                 [
                     render_rgbs.reshape(C * height, width, 3),
-                    render_depths.reshape(
-                        C * height, width, 1).expand(-1, -1, 3),
-                    render_alphas.reshape(
-                        C * height, width, 1).expand(-1, -1, 3),
+                    render_depths.reshape(C * height, width, 1).expand(-1, -1, 3),
+                    render_alphas.reshape(C * height, width, 1).expand(-1, -1, 3),
                 ],
                 dim=1,
             )
@@ -107,26 +105,34 @@ def main(local_rank: int, world_rank, world_size: int, args):
         )
     else:
         means, quats, scales, opacities, sh0, shN = [], [], [], [], [], []
-        for ckpt_path, translate, ax_scale, scene_rotate in zip(args.ckpt, args.translates, args.scales, args.rotates):
+        for ckpt_path, translate, ax_scale, scene_rotate in zip(
+            args.ckpt, args.translates, args.scales, args.rotates
+        ):
             ckpt = torch.load(ckpt_path, map_location=device)["splats"]
-            R = Rotation.from_euler(
-                args.rotate_mode, scene_rotate, degrees=True)
+            R = Rotation.from_euler(args.rotate_mode, scene_rotate, degrees=True)
 
-            transf_means = torch.einsum(
-                "ij,ni->nj",
-                torch.from_numpy(R.as_matrix()).to(device).float(),
-                ckpt["means"] * torch.tensor(ax_scale).to(device)
-            ) + torch.tensor(translate).to(device).float()
+            transf_means = (
+                torch.einsum(
+                    "ij,ni->nj",
+                    torch.from_numpy(R.as_matrix()).to(device).float(),
+                    ckpt["means"] * torch.tensor(ax_scale).to(device),
+                )
+                + torch.tensor(translate).to(device).float()
+            )
             means.append(transf_means)
 
             transf_quats = quat_mul(
-                torch.from_numpy(R.inv().as_quat(scalar_first=True)).to(
-                    device).float().unsqueeze(0),
-                F.normalize(ckpt["quats"], p=2, dim=-1))
+                torch.from_numpy(R.inv().as_quat(scalar_first=True))
+                .to(device)
+                .float()
+                .unsqueeze(0),
+                F.normalize(ckpt["quats"], p=2, dim=-1),
+            )
             quats.append(transf_quats)
 
-            scales.append(torch.exp(ckpt["scales"]) *
-                          torch.tensor(ax_scale).to(device).float())
+            scales.append(
+                torch.exp(ckpt["scales"]) * torch.tensor(ax_scale).to(device).float()
+            )
 
             opacities.append(torch.sigmoid(ckpt["opacities"]))
             sh0.append(ckpt["sh0"])
@@ -183,8 +189,7 @@ def main(local_rank: int, world_rank, world_size: int, args):
             far_plane=render_tab_state.far_plane,
             radius_clip=render_tab_state.radius_clip,
             eps2d=render_tab_state.eps2d,
-            backgrounds=torch.tensor(
-                [render_tab_state.backgrounds], device=device)
+            backgrounds=torch.tensor([render_tab_state.backgrounds], device=device)
             / 255.0,
             render_mode=RENDER_MODE_MAP[render_tab_state.render_mode],
             rasterize_mode=render_tab_state.rasterize_mode,
@@ -192,10 +197,10 @@ def main(local_rank: int, world_rank, world_size: int, args):
             packed=False,
             with_ut=args.with_ut,
             with_eval3d=args.with_eval3d,
+            kernel_t=args.kernel,
         )
         render_tab_state.total_gs_count = len(means)
-        render_tab_state.rendered_gs_count = (
-            info["radii"] > 0).all(-1).sum().item()
+        render_tab_state.rendered_gs_count = (info["radii"] > 0).all(-1).sum().item()
 
         if render_tab_state.render_mode == "rgb":
             # colors represented with sh are not guranteed to be in [0, 1]
@@ -210,8 +215,7 @@ def main(local_rank: int, world_rank, world_size: int, args):
             else:
                 near_plane = depth.min()
                 far_plane = depth.max()
-            depth_norm = (depth - near_plane) / \
-                (far_plane - near_plane + 1e-10)
+            depth_norm = (depth - near_plane) / (far_plane - near_plane + 1e-10)
             depth_norm = torch.clip(depth_norm, 0, 1)
             if render_tab_state.inverse:
                 depth_norm = 1 - depth_norm
@@ -223,8 +227,7 @@ def main(local_rank: int, world_rank, world_size: int, args):
         elif render_tab_state.render_mode == "alpha":
             alpha = render_alphas[0, ..., 0:1]
             renders = (
-                apply_float_colormap(
-                    alpha, render_tab_state.colormap).cpu().numpy()
+                apply_float_colormap(alpha, render_tab_state.colormap).cpu().numpy()
             )
         return renders
 
@@ -286,33 +289,73 @@ if __name__ == "__main__":
         "--with_ut", action="store_true", help="use uncentered transform"
     )
     parser.add_argument(
-        "--translates", type=float, nargs=3, action='append', default=None, help="Apply a translation to axes, as if zip(translates,ckpt)"
+        "--translates",
+        type=float,
+        nargs=3,
+        action="append",
+        default=None,
+        help="Apply a translation to axes, as if zip(translates,ckpt)",
     )
     parser.add_argument(
-        "--scales", type=float, nargs=3, action='append', default=None, help="Apply a scaling to axes, as if zip(scales,ckpt)"
+        "--scales",
+        type=float,
+        nargs=3,
+        action="append",
+        default=None,
+        help="Apply a scaling to axes, as if zip(scales,ckpt)",
     )
     parser.add_argument(
-        "--rotates", type=float, nargs=3, action='append', default=None, help="rotate the scenes by Euler angle rotation in degrees, as if zip(rotates,ckpt)"
+        "--rotates",
+        type=float,
+        nargs=3,
+        action="append",
+        default=None,
+        help="rotate the scenes by Euler angle rotation in degrees, as if zip(rotates,ckpt)",
     )
     parser.add_argument(
-        "--rotate-mode", type=str, default="xyz", help="Euler rotation mode, e.g. zyz, xyz. See scipy.spatial.transform.Rotation for more details."
+        "--rotate-mode",
+        type=str,
+        default="xyz",
+        help="Euler rotation mode, e.g. zyz, xyz. See scipy.spatial.transform.Rotation for more details.",
     )
+
+    def enum_type(EnumT):
+        def parse(enum):
+            try:
+                return EnumT[enum.upper()]
+            except KeyError:
+                raise argparse.ArgumentTypeError(
+                    f"Invalid value '{enum}' for enum {EnumT.__name__}"
+                )
+
+        return parse
+
     parser.add_argument(
-        "--with_eval3d", action="store_true", help="use eval 3D")
+        "-k",
+        "--kernel",
+        type=enum_type(KernelT),
+        default=KernelT.GAUSSIAN,
+        help=f"Choose the splatting kernel. Choices: {[e.name for e in KernelT]}",
+    )
+
+    parser.add_argument("--with_eval3d", action="store_true", help="use eval 3D")
     args = parser.parse_args()
     assert args.scene_grid % 2 == 1, "scene_grid must be odd"
 
     if args.ckpt is not None:
         assert args.translates is None or len(args.translates) == len(
-            args.ckpt), "if translates is used, ckpt and translates must have the same len"
-        args.translates = args.translates or [[0., 0., 0.]]*len(args.ckpt)
+            args.ckpt
+        ), "if translates is used, ckpt and translates must have the same len"
+        args.translates = args.translates or [[0.0, 0.0, 0.0]] * len(args.ckpt)
 
         assert args.scales is None or len(args.scales) == len(
-            args.ckpt), "if scales is used, ckpt and scales must have the same len"
-        args.scales = args.scales or [[1., 1., 1.]]*len(args.ckpt)
+            args.ckpt
+        ), "if scales is used, ckpt and scales must have the same len"
+        args.scales = args.scales or [[1.0, 1.0, 1.0]] * len(args.ckpt)
 
         assert args.rotates is None or len(args.rotates) == len(
-            args.ckpt), "if rotates is used, ckpt and rotates must have the same len"
-        args.rotates = args.rotates or [[0., 0., 0.]]*len(args.ckpt)
+            args.ckpt
+        ), "if rotates is used, ckpt and rotates must have the same len"
+        args.rotates = args.rotates or [[0.0, 0.0, 0.0]] * len(args.ckpt)
 
     cli(main, args, verbose=True)
