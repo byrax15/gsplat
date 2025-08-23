@@ -94,7 +94,8 @@ void launch_rasterize_to_indices_3dgs_kernel(
     // outputs
     at::optional<at::Tensor> chunk_cnts,   // [..., image_height, image_width]
     at::optional<at::Tensor> gaussian_ids, // [n_elems]
-    at::optional<at::Tensor> pixel_ids     // [n_elems]
+    at::optional<at::Tensor> pixel_ids,     // [n_elems]
+    KernelT kernel_t = KernelT::GAUSSIAN
 );
 
 /////////////////////////////////////////////////

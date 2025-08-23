@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import math
 import os
 import time
+from typing import Literal
 
 import imageio
 import numpy as np
@@ -14,7 +15,7 @@ from pathlib import Path
 from gsplat._helper import load_test_data
 from gsplat.cuda._wrapper import KernelT
 from gsplat.distributed import cli
-from gsplat.rendering import rasterization
+from gsplat.rendering import _rasterization, rasterization
 
 from nerfview import CameraState, RenderTabState, apply_float_colormap
 from gsplat_viewer import GsplatViewer, GsplatRenderTabState
@@ -169,8 +170,13 @@ def main(local_rank: int, world_rank, world_size: int, args):
             "depth(expected)": "ED",
             "alpha": "RGB",
         }
+        match args.rasterization:
+            case "gsplat":
+                raster_f = rasterization
+            case "torch":
+                raster_f = _rasterization
 
-        render_colors, render_alphas, info = rasterization(
+        render_colors, render_alphas, info = raster_f(
             means,  # [N, 3]
             quats,  # [N, 4]
             scales,  # [N, 3]
@@ -317,6 +323,13 @@ if __name__ == "__main__":
         type=str,
         default="xyz",
         help="Euler rotation mode, e.g. zyz, xyz. See scipy.spatial.transform.Rotation for more details.",
+    )
+    parser.add_argument(
+        "--rasterization",
+        type=str,
+        choices = ['gsplat','torch'],
+        default='gsplat',
+        help="Choose the rasterizer from those available in `gsplat.rendering`.",
     )
 
     def enum_type(EnumT):

@@ -7,6 +7,8 @@ import torch.nn.functional as F
 from torch import Tensor
 from typing_extensions import Literal, assert_never
 
+from gsplat.cuda._wrapper import KernelT
+
 
 def _quat_to_rotmat(quats: Tensor) -> Tensor:
     """Convert quaternion to rotation matrix."""
@@ -513,6 +515,7 @@ def accumulate(
     image_ids: Tensor,  # [M]
     image_width: int,
     image_height: int,
+    kernel_t: KernelT = KernelT.GAUSSIAN,
 ) -> Tuple[Tensor, Tensor]:
     """Alpah compositing of 2D Gaussians in Pure Pytorch.
 
@@ -577,13 +580,23 @@ def accumulate(
     pixel_coords = torch.stack([pixel_ids_x, pixel_ids_y], dim=-1) + 0.5  # [M, 2]
     deltas = pixel_coords - means2d[image_ids, gaussian_ids]  # [M, 2]
     c = conics[image_ids, gaussian_ids]  # [M, 3]
-    sigmas = (
-        0.5 * (c[:, 0] * deltas[:, 0] ** 2 + c[:, 2] * deltas[:, 1] ** 2)
-        + c[:, 1] * deltas[:, 0] * deltas[:, 1]
-    )  # [M]
-    alphas = torch.clamp_max(
-        opacities[image_ids, gaussian_ids] * torch.exp(-sigmas), 0.999
-    )
+
+    dx2 = deltas[:, 0] ** 2
+    dy2 = deltas[:, 1] ** 2
+    dxdy = deltas[:, 0] * deltas[:, 1]
+    match kernel_t:
+        case KernelT.GAUSSIAN:
+            sigmas = 0.5 * (c[:, 0] * dx2 + c[:, 2] * dy2) + c[:, 1] * dxdy  # [M]
+            alphas = torch.clamp(
+                opacities[image_ids, gaussian_ids] * torch.exp(-sigmas), 0, 0.999
+            )
+        case KernelT.EPANECH:
+            u2 = conics[:, 0] * dx2 + c[:, 2] * dy2 + 2.0 * c[:, 1] * dxdy
+            alphas = torch.clamp(
+                opacities[image_ids, gaussian_ids] * 0.75 * (1.0 - u2), 0, 0.999
+            )
+        case _:
+            raise ValueError("Unknown Kernel Type", kernel_t)
 
     indices = image_ids * image_height * image_width + pixel_ids
     total_pixels = I * image_height * image_width
@@ -616,6 +629,7 @@ def _rasterize_to_pixels(
     flatten_ids: Tensor,  # [n_isects]
     backgrounds: Optional[Tensor] = None,  # [..., channels]
     batch_per_iter: int = 100,
+    kernel_t: KernelT = KernelT.GAUSSIAN,
 ):
     """Pytorch implementation of `gsplat.cuda._wrapper.rasterize_to_pixels()`.
 
@@ -689,6 +703,7 @@ def _rasterize_to_pixels(
             tile_size,
             isect_offsets,
             flatten_ids,
+            kernel_t=kernel_t,
         )  # [M], [M], [M]
         if len(gs_ids) == 0:
             break
@@ -704,6 +719,7 @@ def _rasterize_to_pixels(
             image_ids,
             image_width,
             image_height,
+            kernel_t=kernel_t,
         )
         render_colors = render_colors + renders_step * transmittances[..., None]
         render_alphas = render_alphas + accs_step * transmittances[..., None]

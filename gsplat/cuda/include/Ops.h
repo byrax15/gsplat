@@ -279,7 +279,8 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_3dgs(
     const uint32_t tile_size,
     // intersections
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
-    const at::Tensor flatten_ids   // [n_isects]
+    const at::Tensor flatten_ids,   // [n_isects]
+    KernelT kernel_t = KernelT::GAUSSIAN
 );
 
 // Relocate some Gaussians in the Densification Process.

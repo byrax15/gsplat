@@ -156,7 +156,8 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
         block.sync();
         // process gaussians in the current batch for this pixel
         // 0 index is the furthest back gaussian in the batch
-        for (uint32_t t = max(0, batch_end - warp_bin_final); t < batch_size; ++t) {
+        for (uint32_t t = max(0, batch_end - warp_bin_final); t < batch_size;
+             ++t) {
             bool valid = inside;
             if (batch_end - t > bin_final) {
                 valid = 0;
@@ -180,26 +181,34 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
                 const float dy2 = delta.y * delta.y;
                 const float dxdy = delta.x * delta.y;
 
-                static_assert(kernel_t == KernelT::GAUSSIAN || kernel_t == KernelT::EPANECH,
-                              "Unknown kernel type for rasterize_to_pixels_3dgs_bwd_kernel");
+                static_assert(
+                    kernel_t == KernelT::GAUSSIAN ||
+                        kernel_t == KernelT::EPANECH,
+                    "Unknown kernel type for "
+                    "rasterize_to_pixels_3dgs_bwd_kernel"
+                );
 
                 if constexpr (kernel_t == KernelT::GAUSSIAN) {
-                    const float sigma = 0.5f * (conic.x * dx2 + conic.z * dy2) + conic.y * dxdy;
+                    const float sigma =
+                        0.5f * (conic.x * dx2 + conic.z * dy2) + conic.y * dxdy;
                     vis = __expf(-sigma);
                     if (sigma < 0.f) {
                         alpha = 0.f;
                     } else {
                         alpha = min(0.999f, opac * vis);
-                        if (alpha < ALPHA_THRESHOLD) alpha = 0.f;
+                        if (alpha < ALPHA_THRESHOLD)
+                            alpha = 0.f;
                     }
                 } else if constexpr (kernel_t == KernelT::EPANECH) {
-                    const float u2 = conic.x * dx2 + conic.z * dy2 + 2.0f * conic.y * dxdy;
+                    const float u2 =
+                        conic.x * dx2 + conic.z * dy2 + 2.0f * conic.y * dxdy;
                     if (u2 > 1.0f) {
                         alpha = 0.f;
                     } else {
                         vis = 0.75f * (1.0f - u2);
                         alpha = min(0.999f, opac * vis);
-                        if (alpha < ALPHA_THRESHOLD) alpha = 0.f;
+                        if (alpha < ALPHA_THRESHOLD)
+                            alpha = 0.f;
                     }
                 }
             }
@@ -230,7 +239,8 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
                 }
 #pragma unroll
                 for (uint32_t k = 0; k < CDIM; ++k) {
-                    v_alpha += (rgbs_batch[t * CDIM + k] * T - buffer[k] * ra) * v_render_c[k];
+                    v_alpha += (rgbs_batch[t * CDIM + k] * T - buffer[k] * ra) *
+                               v_render_c[k];
                 }
                 v_alpha += T_final * ra * v_render_a;
                 if (backgrounds != nullptr) {
@@ -253,45 +263,49 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
             const float dxdy = delta.x * delta.y;
 
             // Kernel-specific gradient computation (no IILE)
-            static_assert(kernel_t == KernelT::GAUSSIAN || kernel_t == KernelT::EPANECH,
-                          "Unknown kernel type for rasterize_to_pixels_3dgs_bwd_kernel");
+            static_assert(
+                kernel_t == KernelT::GAUSSIAN || kernel_t == KernelT::EPANECH,
+                "Unknown kernel type for rasterize_to_pixels_3dgs_bwd_kernel"
+            );
 
             vec3 v_conic_local = {0.f, 0.f, 0.f};
             vec2 v_xy_local = {0.f, 0.f};
             vec2 v_xy_abs_local = {0.f, 0.f};
             float v_opacity_local = 0.f;
 
-            if (valid) {
+            if (valid && opac * vis <= .999f) {
                 if constexpr (kernel_t == KernelT::GAUSSIAN) {
-                    if (opac * vis <= 0.999f) {
-                        const float v_sigma = -opac * vis * v_alpha;
-                        v_conic_local = {
-                            0.5f * v_sigma * dx2,
-                            v_sigma * dxdy,
-                            0.5f * v_sigma * dy2
-                        };
-                        v_xy_local = {
-                            v_sigma * (conic.x * delta.x + conic.y * delta.y),
-                            v_sigma * (conic.y * delta.x + conic.z * delta.y)
-                        };
-                        v_xy_abs_local = v_means2d_abs != nullptr ? vec2{abs(v_xy_local.x), abs(v_xy_local.y)} : vec2{0.f, 0.f};
-                        v_opacity_local = vis * v_alpha;
-                    }
+                    const float v_sigma = -opac * vis * v_alpha;
+                    v_conic_local = {
+                        0.5f * v_sigma * dx2,
+                        v_sigma * dxdy,
+                        0.5f * v_sigma * dy2
+                    };
+                    v_xy_local = {
+                        v_sigma * (conic.x * delta.x + conic.y * delta.y),
+                        v_sigma * (conic.y * delta.x + conic.z * delta.y)
+                    };
+                    v_xy_abs_local =
+                        v_means2d_abs != nullptr
+                            ? vec2{abs(v_xy_local.x), abs(v_xy_local.y)}
+                            : vec2{0.f, 0.f};
+                    v_opacity_local = vis * v_alpha;
                 } else if constexpr (kernel_t == KernelT::EPANECH) {
-                    if (opac * vis <= 0.999f) {
-                        const float v_u2 = -opac * 0.75f * v_alpha;
-                        v_conic_local = {
-                            v_u2 * dx2,
-                            2.0f * v_u2 * dxdy,
-                            v_u2 * dy2
-                        };
-                        v_xy_local = {
-                            v_u2 * (2.0f * conic.x * delta.x + 2.0f * conic.y * delta.y),
-                            v_u2 * (2.0f * conic.z * delta.y + 2.0f * conic.y * delta.x)
-                        };
-                        v_xy_abs_local = v_means2d_abs != nullptr ? vec2{abs(v_xy_local.x), abs(v_xy_local.y)} : vec2{0.f, 0.f};
-                        v_opacity_local = vis * v_alpha;
-                    }
+                    const float v_u2 = -opac * 0.75f * v_alpha;
+                    v_conic_local = {
+                        v_u2 * dx2, 2.0f * v_u2 * dxdy, v_u2 * dy2
+                    };
+                    v_xy_local = {
+                        v_u2 * (2.0f * conic.x * delta.x +
+                                2.0f * conic.y * delta.y),
+                        v_u2 * (2.0f * conic.z * delta.y +
+                                2.0f * conic.y * delta.x)
+                    };
+                    v_xy_abs_local =
+                        v_means2d_abs != nullptr
+                            ? vec2{abs(v_xy_local.x), abs(v_xy_local.y)}
+                            : vec2{0.f, 0.f};
+                    v_opacity_local = vis * v_alpha;
                 }
             }
 
@@ -413,11 +427,11 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
     switch (kernel_t) {
         CASE_LAUNCH_BWD(KernelT::GAUSSIAN)
         CASE_LAUNCH_BWD(KernelT::EPANECH)
-        default:
-            AT_ERROR(
-                "Unknown kernel type for rasterize_to_pixels_3dgs_bwd_kernel: ",
-                static_cast<int>(kernel_t)
-            );
+    default:
+        AT_ERROR(
+            "Unknown kernel type for rasterize_to_pixels_3dgs_bwd_kernel: ",
+            static_cast<int>(kernel_t)
+        );
     }
 
 #undef CASE_LAUNCH_BWD

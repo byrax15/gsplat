@@ -248,7 +248,8 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_3dgs(
     const uint32_t tile_size,
     // intersections
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
-    const at::Tensor flatten_ids   // [n_isects]
+    const at::Tensor flatten_ids,   // [n_isects]
+    KernelT kernel_t
 ) {
     DEVICE_GUARD(means2d);
     CHECK_INPUT(means2d);
@@ -284,7 +285,8 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_3dgs(
             c10::nullopt, // chunk_starts
             at::optional<at::Tensor>(chunk_cnts),
             c10::nullopt, // gaussian_ids
-            c10::nullopt  // pixel_ids
+            c10::nullopt,  // pixel_ids
+            kernel_t
         );
         at::Tensor cumsum = at::cumsum(chunk_cnts, 0, chunk_cnts.scalar_type());
         n_elems = cumsum[-1].item<int64_t>();
@@ -312,7 +314,8 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_3dgs(
             at::optional<at::Tensor>(chunk_starts),
             c10::nullopt, // chunk_cnts
             at::optional<at::Tensor>(gaussian_ids),
-            at::optional<at::Tensor>(pixel_ids)
+            at::optional<at::Tensor>(pixel_ids),
+            kernel_t
         );
     }
     return std::make_tuple(gaussian_ids, pixel_ids);

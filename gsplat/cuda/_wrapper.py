@@ -873,6 +873,7 @@ def rasterize_to_indices_in_range(
     tile_size: int,
     isect_offsets: Tensor,  # [..., tile_height, tile_width]
     flatten_ids: Tensor,  # [n_isects]
+    kernel_t: KernelT = KernelT.GAUSSIAN
 ) -> Tuple[Tensor, Tensor, Tensor]:
     """Rasterizes a batch of Gaussians to images but only returns the indices.
 
@@ -937,6 +938,7 @@ def rasterize_to_indices_in_range(
         tile_size,
         isect_offsets.contiguous(),
         flatten_ids.contiguous(),
+        kernel_t.to_cpp()
     )
     out_pixel_ids = out_indices % (image_width * image_height)
     out_image_ids = out_indices // (image_width * image_height)
@@ -1386,6 +1388,7 @@ class _RasterizeToPixels(torch.autograd.Function):
             v_colors,
             v_opacities,
             v_backgrounds,
+            None,
             None,
             None,
             None,

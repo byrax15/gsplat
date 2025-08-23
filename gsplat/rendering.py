@@ -69,6 +69,7 @@ def rasterization(
     rolling_shutter: RollingShutterType = RollingShutterType.GLOBAL,
     viewmats_rs: Optional[Tensor] = None,  # [..., C, 4, 4]
     kernel_t: KernelT = KernelT.GAUSSIAN,
+    **_,
 ) -> Tuple[Tensor, Tensor, Dict]:
     """Rasterize a set of 3D Gaussians (N) to a batch of image planes (C).
 
@@ -794,6 +795,8 @@ def _rasterization(
     rasterize_mode: Literal["classic", "antialiased"] = "classic",
     channel_chunk: int = 32,
     batch_per_iter: int = 100,
+    kernel_t: KernelT = KernelT.GAUSSIAN,
+    **_,
 ) -> Tuple[Tensor, Tensor, Dict]:
     """A version of rasterization() that utilies on PyTorch's autograd.
 
@@ -966,6 +969,7 @@ def _rasterization(
                 flatten_ids,
                 backgrounds=backgrounds_chunk,
                 batch_per_iter=batch_per_iter,
+                kernel_t=kernel_t
             )
             render_colors.append(render_colors_)
             render_alphas.append(render_alphas_)
@@ -984,6 +988,7 @@ def _rasterization(
             flatten_ids,
             backgrounds=backgrounds,
             batch_per_iter=batch_per_iter,
+            kernel_t=kernel_t,
         )
     if render_mode in ["ED", "RGB+ED"]:
         # normalize the accumulated depth to get the expected depth

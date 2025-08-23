@@ -34,7 +34,7 @@ from gsplat import export_splats
 from gsplat.compression import PngCompression
 from gsplat.distributed import cli
 from gsplat.optimizers import SelectiveAdam
-from gsplat.rendering import rasterization
+from gsplat.rendering import rasterization, _rasterization, KernelT
 from gsplat.strategy import DefaultStrategy, MCMCStrategy, BudgetStrategy
 from gsplat_viewer import GsplatViewer, GsplatRenderTabState
 from nerfview import CameraState, RenderTabState, apply_float_colormap
@@ -52,6 +52,22 @@ class Config:
     compression: Optional[Literal["png"]] = None
     # Render trajectory path
     render_traj_path: str = "interp"
+
+    rasterization: Literal["gsplat", "torch"] = "gsplat"
+    @property
+    def _rasterization(self):
+        match self.rasterization:
+            case "gsplat":
+                return rasterization
+            case "torch":
+                return _rasterization
+            case _:
+                raise ValueError("Unknown rasterization method.", self.rasterization)
+
+    kernel: Literal["GAUSSIAN", "EPANECH"] = "GAUSSIAN"
+    @property
+    def _kernel_t(self) -> KernelT:
+        return KernelT[self.kernel]
 
     # Path to the Mip-NeRF 360 dataset
     data_dir: str = "data/360_v2/garden"
@@ -560,7 +576,7 @@ class Runner:
             rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         if camera_model is None:
             camera_model = self.cfg.camera_model
-        render_colors, render_alphas, info = rasterization(
+        render_colors, render_alphas, info = cfg._rasterization(
             means=means,
             quats=quats,
             scales=scales,
@@ -582,6 +598,7 @@ class Runner:
             camera_model=self.cfg.camera_model,
             with_ut=self.cfg.with_ut,
             with_eval3d=self.cfg.with_eval3d,
+            kernel_t=cfg._kernel_t,
             **kwargs,
         )
         if masks is not None:

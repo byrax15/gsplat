@@ -167,7 +167,7 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
                 if (u2 > 1.0f) {
                     alpha = 0.0f;
                 } else {
-                    alpha = min(0.999f, opac * 0.75f * (1.0f - u2));
+                    alpha = min(0.999f, opac * (1.0f - u2));
                 }
             }
 

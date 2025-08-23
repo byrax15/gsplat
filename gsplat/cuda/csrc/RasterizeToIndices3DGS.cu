@@ -10,7 +10,7 @@ namespace gsplat {
 
 namespace cg = cooperative_groups;
 
-template <typename scalar_t>
+template <typename scalar_t, KernelT kernel_t = KernelT::GAUSSIAN>
 __global__ void rasterize_to_indices_3dgs_kernel(
     const uint32_t range_start,
     const uint32_t range_end,
@@ -28,11 +28,12 @@ __global__ void rasterize_to_indices_3dgs_kernel(
     const int32_t *__restrict__ tile_offsets, // [..., tile_height, tile_width]
     const int32_t *__restrict__ flatten_ids,  // [n_isects]
     const scalar_t
-        *__restrict__ transmittances,         // [..., image_height, image_width]
-    const int32_t *__restrict__ chunk_starts, // [..., image_height, image_width]
-    int32_t *__restrict__ chunk_cnts,         // [..., image_height, image_width]
-    int64_t *__restrict__ gaussian_ids,       // [n_elems]
-    int64_t *__restrict__ pixel_ids           // [n_elems]
+        *__restrict__ transmittances, // [..., image_height, image_width]
+    const int32_t
+        *__restrict__ chunk_starts,     // [..., image_height, image_width]
+    int32_t *__restrict__ chunk_cnts,   // [..., image_height, image_width]
+    int64_t *__restrict__ gaussian_ids, // [n_elems]
+    int64_t *__restrict__ pixel_ids     // [n_elems]
 ) {
     // each thread draws one pixel, but also timeshares caching gaussians in a
     // shared tile
@@ -135,14 +136,34 @@ __global__ void rasterize_to_indices_3dgs_kernel(
             const vec3 xy_opac = xy_opacity_batch[t];
             const float opac = xy_opac.z;
             const vec2 delta = {xy_opac.x - px, xy_opac.y - py};
-            const float sigma = 0.5f * (conic.x * delta.x * delta.x +
-                                        conic.z * delta.y * delta.y) +
-                                conic.y * delta.x * delta.y;
-            float alpha = min(0.999f, opac * __expf(-sigma));
 
-            if (sigma < 0.f || alpha < ALPHA_THRESHOLD) {
-                continue;
+            // Common Mahalanobis terms
+            const float dx2 = delta.x * delta.x;
+            const float dy2 = delta.y * delta.y;
+            const float dxdy = delta.x * delta.y;
+
+            static_assert(kernel_t == KernelT::GAUSSIAN || kernel_t == KernelT::EPANECH,
+                          "Unknown kernel type for rasterize_to_pixels_3dgs_fwd_kernel");
+
+            float alpha;
+            if constexpr (kernel_t == KernelT::GAUSSIAN) {
+                float sigma = 0.5f * (conic.x * dx2 + conic.z * dy2) + conic.y * dxdy;
+                if (sigma < 0.f) {
+                    alpha = 0.0f;
+                } else {
+                    alpha = min(0.999f, opac * __expf(-sigma));
+                }
+            } else if constexpr (kernel_t == KernelT::EPANECH) {
+                float u2 = conic.x * dx2 + conic.z * dy2 + 2.0f * conic.y * dxdy;
+                if (u2 > 1.0f) {
+                    alpha = 0.0f;
+                } else {
+                    alpha = min(0.999f, opac * (1.0f - u2));
+                }
             }
+
+            if (alpha < ALPHA_THRESHOLD)
+                continue;
 
             next_trans = trans * (1.0f - alpha);
             if (next_trans <= 1e-4) { // this pixel is done: exclusive
@@ -194,9 +215,10 @@ void launch_rasterize_to_indices_3dgs_kernel(
     // outputs
     at::optional<at::Tensor> chunk_cnts,   // [..., image_height, image_width]
     at::optional<at::Tensor> gaussian_ids, // [n_elems]
-    at::optional<at::Tensor> pixel_ids     // [n_elems]
+    at::optional<at::Tensor> pixel_ids,    // [n_elems]
+    KernelT kernel_t
 ) {
-    uint32_t N = means2d.size(-2); // number of gaussians
+    uint32_t N = means2d.size(-2);          // number of gaussians
     uint32_t I = means2d.numel() / (2 * N); // number of images
     uint32_t tile_height = tile_offsets.size(-2);
     uint32_t tile_width = tile_offsets.size(-1);
@@ -225,33 +247,47 @@ void launch_rasterize_to_indices_3dgs_kernel(
         );
     }
 
-    rasterize_to_indices_3dgs_kernel<float>
-        <<<grid, threads, shmem_size, at::cuda::getCurrentCUDAStream()>>>(
-            range_start,
-            range_end,
-            I,
-            N,
-            n_isects,
-            reinterpret_cast<vec2 *>(means2d.data_ptr<float>()),
-            reinterpret_cast<vec3 *>(conics.data_ptr<float>()),
-            opacities.data_ptr<float>(),
-            image_width,
-            image_height,
-            tile_size,
-            tile_width,
-            tile_height,
-            tile_offsets.data_ptr<int32_t>(),
-            flatten_ids.data_ptr<int32_t>(),
-            transmittances.data_ptr<float>(),
-            chunk_starts.has_value() ? chunk_starts.value().data_ptr<int32_t>()
-                                     : nullptr,
-            chunk_cnts.has_value() ? chunk_cnts.value().data_ptr<int32_t>()
-                                   : nullptr,
-            gaussian_ids.has_value() ? gaussian_ids.value().data_ptr<int64_t>()
-                                     : nullptr,
-            pixel_ids.has_value() ? pixel_ids.value().data_ptr<int64_t>()
-                                  : nullptr
-        );
+#define LAUNCH_RASTER(KERNEL_T)                                                \
+    case KERNEL_T:                                                             \
+        rasterize_to_indices_3dgs_kernel<float, KERNEL_T>                      \
+            <<<grid, threads, shmem_size, at::cuda::getCurrentCUDAStream()>>>( \
+                range_start,                                                   \
+                range_end,                                                     \
+                I,                                                             \
+                N,                                                             \
+                n_isects,                                                      \
+                reinterpret_cast<vec2 *>(means2d.data_ptr<float>()),           \
+                reinterpret_cast<vec3 *>(conics.data_ptr<float>()),            \
+                opacities.data_ptr<float>(),                                   \
+                image_width,                                                   \
+                image_height,                                                  \
+                tile_size,                                                     \
+                tile_width,                                                    \
+                tile_height,                                                   \
+                tile_offsets.data_ptr<int32_t>(),                              \
+                flatten_ids.data_ptr<int32_t>(),                               \
+                transmittances.data_ptr<float>(),                              \
+                chunk_starts.has_value()                                       \
+                    ? chunk_starts.value().data_ptr<int32_t>()                 \
+                    : nullptr,                                                 \
+                chunk_cnts.has_value()                                         \
+                    ? chunk_cnts.value().data_ptr<int32_t>()                   \
+                    : nullptr,                                                 \
+                gaussian_ids.has_value()                                       \
+                    ? gaussian_ids.value().data_ptr<int64_t>()                 \
+                    : nullptr,                                                 \
+                pixel_ids.has_value() ? pixel_ids.value().data_ptr<int64_t>()  \
+                                      : nullptr                                \
+            );                                                                 \
+        break;
+
+    switch (kernel_t) {
+        LAUNCH_RASTER(KernelT::GAUSSIAN)
+        LAUNCH_RASTER(KernelT::EPANECH)
+    default:
+        AT_ERROR("Unsupported kernel type: ", static_cast<int>(kernel_t));
+    }
+#undef LAUNCH_RASTER
 }
 
 } // namespace gsplat
