@@ -584,16 +584,18 @@ def accumulate(
     dx2 = deltas[:, 0] ** 2
     dy2 = deltas[:, 1] ** 2
     dxdy = deltas[:, 0] * deltas[:, 1]
+    mahalanobis = torch.sqrt(c[:, 0] * dx2 + c[:, 2] * dy2 + 2.0 * c[:, 1] * dxdy)
     match kernel_t:
         case KernelT.GAUSSIAN:
-            sigmas = 0.5 * (c[:, 0] * dx2 + c[:, 2] * dy2) + c[:, 1] * dxdy  # [M]
             alphas = torch.clamp(
-                opacities[image_ids, gaussian_ids] * torch.exp(-sigmas), 0, 0.999
+                opacities[image_ids, gaussian_ids] * torch.exp(-0.5 * mahalanobis**2),
+                0,
+                0.999,
             )
         case KernelT.EPANECH:
-            u2 = conics[:, 0] * dx2 + c[:, 2] * dy2 + 2.0 * c[:, 1] * dxdy
+            u2 = torch.clamp(mahalanobis**2, min=0)
             alphas = torch.clamp(
-                opacities[image_ids, gaussian_ids] * 0.75 * (1.0 - u2), 0, 0.999
+                opacities[image_ids, gaussian_ids] * (1.0 - u2)/6., 0, 0.999
             )
         case _:
             raise ValueError("Unknown Kernel Type", kernel_t)

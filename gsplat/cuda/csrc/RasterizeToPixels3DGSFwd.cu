@@ -150,25 +150,22 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
             const float dx2 = delta.x * delta.x;
             const float dy2 = delta.y * delta.y;
             const float dxdy = delta.x * delta.y;
+            const float mahalanobis = std::sqrt(
+                conic.x * dx2 + conic.z * dy2 + 2.0f * conic.y * dxdy
+            );
 
-            static_assert(kernel_t == KernelT::GAUSSIAN || kernel_t == KernelT::EPANECH,
-                          "Unknown kernel type for rasterize_to_pixels_3dgs_fwd_kernel");
+            static_assert(
+                kernel_t == KernelT::GAUSSIAN || kernel_t == KernelT::EPANECH,
+                "Unknown kernel type for rasterize_to_pixels_3dgs_fwd_kernel"
+            );
 
             float alpha;
             if constexpr (kernel_t == KernelT::GAUSSIAN) {
-                float sigma = 0.5f * (conic.x * dx2 + conic.z * dy2) + conic.y * dxdy;
-                if (sigma < 0.f) {
-                    alpha = 0.0f;
-                } else {
-                    alpha = min(0.999f, opac * __expf(-sigma));
-                }
+                alpha =
+                    min(0.999f, opac * __expf(-.5 * mahalanobis * mahalanobis));
             } else if constexpr (kernel_t == KernelT::EPANECH) {
-                float u2 = conic.x * dx2 + conic.z * dy2 + 2.0f * conic.y * dxdy;
-                if (u2 > 1.0f) {
-                    alpha = 0.0f;
-                } else {
-                    alpha = min(0.999f, opac * (1.0f - u2));
-                }
+                const float u2 = max(0.f, mahalanobis * mahalanobis);
+                alpha = min(0.999f, opac * (1.0f - u2 / 6.f));
             }
 
             if (alpha < ALPHA_THRESHOLD)
@@ -296,11 +293,11 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
     switch (kernel_t) {
         CASE_LAUNCH_FWD(KernelT::GAUSSIAN)
         CASE_LAUNCH_FWD(KernelT::EPANECH)
-        default:
-            AT_ERROR(
-                "Unknown kernel type for rasterize_to_pixels_3dgs_fwd_kernel: ",
-                static_cast<int>(kernel_t)
-            );
+    default:
+        AT_ERROR(
+            "Unknown kernel type for rasterize_to_pixels_3dgs_fwd_kernel: ",
+            static_cast<int>(kernel_t)
+        );
     }
 
 #undef CASE_LAUNCH_FWD

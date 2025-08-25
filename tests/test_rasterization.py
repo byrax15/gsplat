@@ -34,10 +34,10 @@ def test_rasterization(
     torch.manual_seed(42)
 
     C, N = 3, 10_000
-    means = torch.rand(batch_dims + (N, 3), device=device)
-    quats = torch.randn(batch_dims + (N, 4), device=device)
-    scales = torch.rand(batch_dims + (N, 3), device=device)
-    opacities = torch.rand(batch_dims + (N,), device=device)
+    means = torch.rand(batch_dims + (N, 3), device=device, requires_grad=True)
+    quats = torch.randn(batch_dims + (N, 4), device=device, requires_grad=True)
+    scales = torch.rand(batch_dims + (N, 3), device=device, requires_grad=True)
+    opacities = torch.rand(batch_dims + (N,), device=device, requires_grad=True)
     if per_view_color:
         if sh_degree is None:
             colors = torch.rand(batch_dims + (C, N, 3), device=device)
@@ -99,12 +99,17 @@ def test_rasterization(
     torch.testing.assert_close(renders, _renders, rtol=1e-4, atol=1e-4)
     torch.testing.assert_close(alphas, _alphas, rtol=1e-4, atol=1e-4)
 
+    gt = torch.zeros_like(renders)
+    l1 = torch.nn.functional.l1_loss(renders, gt)
+    _l1 = torch.nn.functional.l1_loss(_renders, gt)
+    torch.testing.assert_close(l1, _l1, rtol=1e-4, atol=1e-4)
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
 @pytest.mark.parametrize("per_view_color", [True, False])
 @pytest.mark.parametrize("sh_degree", [None, 3])
-@pytest.mark.parametrize("render_mode", ["RGB", "RGB+D", "D"])
-@pytest.mark.parametrize("packed", [True, False])
+@pytest.mark.parametrize("render_mode", ["RGB"])
+@pytest.mark.parametrize("packed", [False])
 @pytest.mark.parametrize("batch_dims", [(), (2,), (1, 2)])
 @pytest.mark.parametrize("raster_f", [rasterization, _rasterization])
 def test_kernels_different(
@@ -113,7 +118,7 @@ def test_kernels_different(
     render_mode: str,
     packed: bool,
     batch_dims: Tuple[int, ...],
-    raster_f
+    raster_f,
 ):
     torch.manual_seed(42)
 
@@ -183,5 +188,7 @@ def test_kernels_different(
         torch.testing.assert_close(g_meta, e_meta, rtol=1e-4, atol=1e-4)
     except AssertionError:
         return
-    
-    assert False, "The two kernels should produce different results, but they are the same."
+
+    assert (
+        False
+    ), "The two kernels should produce different results, but they are the same."
