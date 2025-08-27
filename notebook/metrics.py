@@ -1,30 +1,28 @@
-from dataclasses import dataclass
 from glob import glob
 import json
 import pathlib
-from typing import Any
 import torch
+import numpy as np
 import pandas as pd
 import re
-import sys
+from tensorboard.backend.event_processing import event_accumulator
 
 
-def get_stats(experiment_glob: str):
+def get_stats(experiment_glob, float_vars, int_vars, str_vars, flag_vars):
     scene_match = re.compile(
         r"(?P<scene>(cloud[+]small)|(fire[+]smoke)|(teapot)|(cube))"
     )
     frame_no_match = re.compile(r"colmap_(?P<frame_no>\d+)")
     extra_indep_vars_matches = {
-        k: (re.compile(v), default)
-        for k, (v, default) in {
-            # "min-target": (r"min-target=(?P<mintarget>\d+)", None),
-            # "max-target": (r"max-target=(?P<maxtarget>\d+)", None),
-            # "prune-opa": (r"prune-opa=(?P<pruneopa>[+-]?\d*\.?\d+([eE][+-]?\d+)?)", Exception('Prune-Opa Not Found')),
-            # "density-reg": (
-            #     r"density-reg=(?P<densityreg>[+-]?\d*\.?\d+([eE][+-]?\d+)?)",
-            #     None,
-            # ),
-            # "density-cells": (r"density-cells=(?P<densitycells>\d+)", None),
+        k: (re.compile(v), default, success)
+        for k, (v, default, success) in {
+            **{
+                f: (rf"{f}[=]?([+-]?\d*\.?\d+([eE][+-]?\d+)?)", None, None)
+                for f in float_vars
+            },
+            **{i: (rf"{i}[=]?([+-]?\d+)", None, None) for i in int_vars},
+            **{s: (rf"{s}[=]?(\w+)", None, None) for s in str_vars},
+            **{f: (rf"({f})", False, True) for f in flag_vars},
         }.items()
     }
 
@@ -43,6 +41,8 @@ def get_stats(experiment_glob: str):
                 last_stats.parent.glob("val_step*.json"),
                 key=lambda f: f.stat().st_mtime,
             )[-1]
+            ea = event_accumulator.EventAccumulator(str(list(frame.glob("tb/*"))[-1]))
+            _absorb_print = ea.Reload()
         except IndexError:
             continue
 
@@ -55,9 +55,9 @@ def get_stats(experiment_glob: str):
             frame_no = int(match["frame_no"])
 
         extra_indep_vars = {}
-        for k, (matcher, default) in extra_indep_vars_matches.items():
+        for k, (matcher, default, success) in extra_indep_vars_matches.items():
             if match := matcher.search(str(last_stats)):
-                extra_indep_vars[k] = match.group(1)
+                extra_indep_vars[k] = success or match.group(1)
             elif isinstance(default, Exception):
                 default.add_note("\tin line: " + str(last_stats))
                 raise default
@@ -71,20 +71,28 @@ def get_stats(experiment_glob: str):
         averages = json.load(averages.open())
 
         yield {
+            "time": frame.stem,
             "scene": scene,
             "frame": frame_no,
             **extra_indep_vars,
             **averages,
             "psnr_no_inf": psnr_no_inf,
+            "loss": np.mean([s.value for s in ea.Scalars("train/loss")]),
         }
 
 
 def main(
     experiment_glob: str,
     /,
+    float_vars: list[str] = [],
+    int_vars: list[str] = [],
+    str_vars: list[str] = [],
+    flag_vars: list[str] = [],
 ):
-    data = pd.DataFrame(get_stats(experiment_glob))
-    print(data.to_csv(index=False))
+    data = pd.DataFrame(
+        get_stats(experiment_glob, float_vars, int_vars, str_vars, flag_vars)
+    )
+    print(data.to_csv(index=False, decimal=",", sep=";"))
 
 
 if __name__ == "__main__":
