@@ -110,14 +110,24 @@ def main(local_rank: int, world_rank, world_size: int, args):
             args.ckpt, args.translates, args.scales, args.rotates
         ):
             ckpt = torch.load(ckpt_path, map_location=device)["splats"]
-            R = Rotation.from_euler(args.rotate_mode, scene_rotate, degrees=True)
+            R = (
+                Rotation.from_euler(
+                    args.rotate_mode, args.world_rotate, degrees=True
+                ).inv()
+                * Rotation.from_euler(
+                    args.rotate_mode, scene_rotate, degrees=True
+                ).inv()
+            )
 
             transf_means = (
                 torch.einsum(
                     "ij,ni->nj",
                     torch.from_numpy(R.as_matrix()).to(device).float(),
-                    ckpt["means"] * torch.tensor(ax_scale).to(device),
+                    ckpt["means"]
+                    * torch.tensor(ax_scale).to(device)
+                    / torch.tensor(args.world_scale).to(device),
                 )
+                - torch.tensor(args.world_translate).to(device).float()
                 + torch.tensor(translate).to(device).float()
             )
             means.append(transf_means)
@@ -132,7 +142,11 @@ def main(local_rank: int, world_rank, world_size: int, args):
             quats.append(transf_quats)
 
             scales.append(
-                torch.exp(ckpt["scales"]) * torch.tensor(ax_scale).to(device).float()
+                (
+                    ckpt["scales"].exp()
+                    * torch.tensor(ax_scale).to(device).float()
+                    / torch.tensor(args.world_scale).to(device)
+                ).log()
             )
 
             opacities.append(torch.sigmoid(ckpt["opacities"]))
@@ -295,6 +309,28 @@ if __name__ == "__main__":
         "--with_ut", action="store_true", help="use uncentered transform"
     )
     parser.add_argument(
+        "--world-rotate",
+        type=float,
+        nargs=3,
+        default=[0, 0, 0],
+        help="Apply a rotation to the world axes",
+    )
+    parser.add_argument(
+        "--world-translate",
+        type=float,
+        nargs=3,
+        default=[0, 0, 0],
+        help="Apply a translation to the world axes",
+    )
+    parser.add_argument(
+        "--world-scale",
+        type=float,
+        nargs=3,
+        default=[1, 1, 1],
+        help="Apply a scaling to the world axes",
+    )
+    parser.add_argument(
+        "-t",
         "--translates",
         type=float,
         nargs=3,
@@ -303,6 +339,7 @@ if __name__ == "__main__":
         help="Apply a translation to axes, as if zip(translates,ckpt)",
     )
     parser.add_argument(
+        "-s",
         "--scales",
         type=float,
         nargs=3,
@@ -311,6 +348,7 @@ if __name__ == "__main__":
         help="Apply a scaling to axes, as if zip(scales,ckpt)",
     )
     parser.add_argument(
+        "-r",
         "--rotates",
         type=float,
         nargs=3,
@@ -327,8 +365,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--rasterization",
         type=str,
-        choices = ['gsplat','torch'],
-        default='gsplat',
+        choices=["gsplat", "torch"],
+        default="gsplat",
         help="Choose the rasterizer from those available in `gsplat.rendering`.",
     )
 
